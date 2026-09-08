@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { PanelApi } from "../store";
 import { VideoCard } from "./VideoCard";
 import { FiltersBar } from "./FiltersBar";
-import { formatCount } from "../../../shared/utils";
+import { formatCount, getModifierKeyLabel } from "../../../shared/utils";
 import type { VideoCandidate } from "../../../shared/types";
 
 export function ResultsTab({ state, panel, visible, matched, selected }: {
@@ -10,6 +10,7 @@ export function ResultsTab({ state, panel, visible, matched, selected }: {
   visible: VideoCandidate[]; matched: number; selected: number;
 }) {
   const [filter, setFilter] = useState("");
+  const modKey = useMemo(() => getModifierKeyLabel(), []);
 
   const filtered = useMemo(() => {
     const q = filter.toLowerCase().trim();
@@ -34,8 +35,8 @@ export function ResultsTab({ state, panel, visible, matched, selected }: {
           onChange={(e) => setFilter(e.target.value)}
         />
         <div className="results-actions">
-          <button className="btn sm" onClick={panel.selectAll}>Выбрать все</button>
-          <button className="btn sm" onClick={panel.selectNone}>Снять</button>
+          <button className="btn sm" onClick={panel.selectAll} title={`Выбрать все (${modKey}+A)`}>Выбрать все</button>
+          <button className="btn sm" onClick={panel.selectNone} title={`Снять выбор (${modKey}+D)`}>Снять</button>
         </div>
       </div>
 

@@ -11,6 +11,7 @@
     "dev": "node scripts/build.mjs --watch",
     "build": "node scripts/build.mjs",
     "package": "npm run build && node scripts/package.mjs",
+    "package:chrome-macos": "npm run --prefix video-downloader-explorer package:chrome-macos",
     "icons": "node scripts/make-icons.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

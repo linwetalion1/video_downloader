@@ -1,6 +1,6 @@
 // Главный компонент side panel. Включает детальный status-баннер с активной
 // фазой работы, табы, и все экраны.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePanel } from "./store";
 import { FindTab } from "./components/FindTab";
 import { ResultsTab } from "./components/ResultsTab";
@@ -8,7 +8,7 @@ import { DownloadsTab } from "./components/DownloadsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { LogsTab } from "./components/LogsTab";
 import { StatusBanner } from "./components/StatusBanner";
-import { formatBytes, formatCount } from "../../shared/utils";
+import { formatBytes, formatCount, getModifierKeyLabel } from "../../shared/utils";
 import { countMatched, matchesFilters, sortCandidates } from "../../media/filters";
 import type { TabKey } from "./types";
 
@@ -16,6 +16,7 @@ export function App() {
   const panel = usePanel();
   const { state, send } = panel;
   const [tab, setTab] = useState<TabKey>("find");
+  const modKey = useMemo(() => getModifierKeyLabel(), []);
 
   const visible = useMemo(() => {
     const filtered = state.view.candidates.filter((c) => matchesFilters(c, state.settings));
@@ -34,22 +35,10 @@ export function App() {
     }
   }, [state.view.candidates.length, state.view.status]);
 
-  // Горячие клавиши.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); panel.selectAll(); }
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") { e.preventDefault(); panel.selectNone(); }
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); setTab("find"); }
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") { e.preventDefault(); setTab("logs"); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [panel]);
-
-  const downloadSelected = () => {
-    const selected = state.view.candidates.filter((c) => c.selected);
-    const blobOnly = selected.filter((c) => c.isBlob).length;
-    const ids = selected.filter((c) => !c.isBlob && c.status !== "downloaded").map((c) => c.id);
+  const downloadSelected = useCallback(() => {
+    const selectedList = state.view.candidates.filter((c) => c.selected);
+    const blobOnly = selectedList.filter((c) => c.isBlob).length;
+    const ids = selectedList.filter((c) => !c.isBlob && c.status !== "downloaded").map((c) => c.id);
     if (ids.length === 0) {
       if (blobOnly > 0) {
         panel.setBanner(`blob-кандидаты — это поток MSE без файла (${blobOnly} шт.). Выберите прямые mp4/HLS-ссылки из списка (у них бейдж MP4/HLS) или нажмите «🔍 Найти источники» на карточке.`);
@@ -61,7 +50,20 @@ export function App() {
     }
     send({ type: "VDE_DOWNLOAD", ids });
     setTab("downloads");
-  };
+  }, [state.view.candidates, panel, send]);
+
+  // Горячие клавиши (с учётом ⌘ на macOS и Ctrl на Windows).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); panel.selectAll(); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") { e.preventDefault(); panel.selectNone(); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); setTab("find"); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") { e.preventDefault(); setTab("logs"); }
+      else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); downloadSelected(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [panel, downloadSelected]);
 
   return (
     <div className="app">
@@ -129,7 +131,7 @@ export function App() {
             className="btn primary"
             disabled={selected === 0}
             onClick={downloadSelected}
-            title="Скачать выбранные (Ctrl+Enter)"
+            title={`Скачать выбранные (${modKey}+Enter)`}
           >
             ⬇ Скачать {selected > 0 ? `(${formatCount(selected)})` : ""}
           </button>

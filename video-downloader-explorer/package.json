@@ -11,6 +11,8 @@
     "dev": "node scripts/build.mjs --watch",
     "build": "node scripts/build.mjs",
     "package": "npm run build && node scripts/package.mjs",
+    "package:chrome-macos": "npm run build && node scripts/package-chrome-macos.mjs",
+    "package:all": "npm run package && npm run package:chrome-macos",
     "icons": "node scripts/make-icons.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

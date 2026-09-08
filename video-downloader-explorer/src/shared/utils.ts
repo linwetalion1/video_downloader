@@ -134,16 +134,42 @@ export function variantGroupKey(videoUrl: string): string {
 
 export function sanitizeFilename(name: string): string {
   const cleaned = name
-    // Запрещённые Windows-символы + control.
+    // Приводим Unicode к форме NFC (Composed), чтобы в macOS Finder и APFS/HFS+
+    // составные символы (диакритики, кириллица) не вызывали ошибку chrome.downloads
+    .normalize("NFC")
+    // Запрещённые Windows & macOS Finder символы + управляющие символы:
+    // Windows запрещает <>:"/\|?*, macOS Finder резервирует : и /
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "")
     // Emoji (суррогатные пары), вариационные селекторы, zero-width/ZWL/ZWNJ,
-    // BOM, приватные символы — Windows-Reject при chrome.downloads ("Invalid filename").
+    // BOM, приватные символы — вызывают "Invalid filename" в Chrome
     .replace(/[\uD800-\uDFFF\uFE0F\uFEFF\u200B-\u200F\u2028-\u202E\u2060-\u2064\u007F-\u009F]/g, "")
     .replace(/\s+/g, " ")
     .trim()
+    // В macOS файлы с точкой в начале становятся скрытыми в Finder
+    .replace(/^[.\s_\-]+/, "")
+    // Завершающие точки и пробелы не поддерживаются Chrome при скачивании
+    .replace(/[.\s_\-]+$/, "")
     .slice(0, 120);
   return cleaned || "video";
 }
+
+/** Определение платформы macOS (работает в браузере, Service Worker, Node). */
+export function isMacOS(): boolean {
+  if (typeof navigator !== "undefined") {
+    return /Mac|iPhone|iPod|iPad/i.test(navigator.userAgent || (navigator as { platform?: string }).platform || "");
+  }
+  const proc = (globalThis as { process?: { platform?: string } }).process;
+  if (proc && proc.platform) {
+    return proc.platform === "darwin";
+  }
+  return false;
+}
+
+/** Символ клавиши-модификатора (⌘ для macOS, Ctrl для остальных). */
+export function getModifierKeyLabel(): string {
+  return isMacOS() ? "⌘" : "Ctrl";
+}
+
 
 /** Парсит Content-Disposition. */
 export function parseContentDisposition(cd: string | null): string | null {
@@ -330,6 +356,7 @@ export function applyFilenameTemplate(
     .replace(/[\s_\-]+(?=\.)/g, "")
     .replace(/[\s_\-]+$/, "")
     .trim();
+  if (out.startsWith(".")) out = `video${out}`;
   return out || "video";
 }
 

@@ -601,6 +601,12 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // ─── Lifecycle ────────────────────────────────────────────────────────────
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+// Фолбэк для Chrome на macOS: если setPanelBehavior не перехватил клик, открываем Side Panel вручную
+chrome.action?.onClicked?.addListener(async (tab) => {
+  if (tab.id && chrome.sidePanel?.open) {
+    await chrome.sidePanel.open({ tabId: tab.id }).catch(() => undefined);
+  }
+});
 installWebRequestObserver();
 
 chrome.runtime.onInstalled.addListener(() => {

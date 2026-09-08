@@ -1,6 +1,10 @@
 // Тесты утилит.
 import { describe, it, expect } from "vitest";
-import { canonicalUrl, variantGroupKey, applyFilenameTemplate, formatBytes, formatDuration, formatBitrate, normalizePlaybackUrl, looksLikeErrorPayload } from "../src/shared/utils";
+import {
+  canonicalUrl, variantGroupKey, applyFilenameTemplate, formatBytes,
+  formatDuration, formatBitrate, normalizePlaybackUrl, looksLikeErrorPayload,
+  sanitizeFilename, isMacOS, getModifierKeyLabel,
+} from "../src/shared/utils";
 
 describe("canonicalUrl", () => {
   it("вырезает utm", () => {
@@ -100,4 +104,50 @@ describe("applyFilenameTemplate: схлопывание пустых плейс�
     expect(applyFilenameTemplate("{domain}_{quality}", {}))
       .toBe("video");
   });
+  it("пустой title не создаёт скрытый dot-файл на macOS (.mp4 -> video.mp4)", () => {
+    expect(applyFilenameTemplate("{title}.{ext}", { title: "", ext: "mp4" }))
+      .toBe("video.mp4");
+  });
 });
+
+describe("sanitizeFilename (macOS APFS/HFS+ & Windows)", () => {
+  it("нормализует декомпозированный Unicode (NFD -> NFC) для macOS APFS/HFS+", () => {
+    // Кириллица "й" в NFD: "и" (U+0438) + comb combining breve (U+0306)
+    const nfdString = "\u0438\u0306";
+    const sanitized = sanitizeFilename(nfdString);
+    expect(sanitized).toBe("\u0439"); // "й" в NFC
+    expect(sanitized.normalize("NFC")).toBe(sanitized);
+  });
+
+  it("удаляет двоеточия (зарезервированы в macOS Finder) и слэши", () => {
+    expect(sanitizeFilename("stream: episode / 01")).toBe("stream episode 01");
+    expect(sanitizeFilename("video:test?*<>|path\\")).toBe("videotestpath");
+  });
+
+  it("удаляет начальные точки (предотвращает скрытые файлы в macOS Finder)", () => {
+    expect(sanitizeFilename(".hidden_stream.mp4")).toBe("hidden_stream.mp4");
+    expect(sanitizeFilename("..test")).toBe("test");
+  });
+
+  it("удаляет хвостовые точки и пробелы", () => {
+    expect(sanitizeFilename("stream. ")).toBe("stream");
+    expect(sanitizeFilename("video...")).toBe("video");
+  });
+
+  it("удаляет emoji-суррогаты и zero-width символы, вызывающие сбои в Chrome", () => {
+    expect(sanitizeFilename("стрим 🔴 live \u200B \uFEFF эфир")).toBe("стрим live эфир");
+  });
+
+  it("возвращает дефолтное имя video, если имя полностью состояло из запрещённых символов", () => {
+    expect(sanitizeFilename(":::///???")).toBe("video");
+    expect(sanitizeFilename("")).toBe("video");
+  });
+});
+
+describe("platform helpers", () => {
+  it("isMacOS и getModifierKeyLabel возвращают валидные значения", () => {
+    expect(typeof isMacOS()).toBe("boolean");
+    expect(["⌘", "Ctrl"]).toContain(getModifierKeyLabel());
+  });
+});
+

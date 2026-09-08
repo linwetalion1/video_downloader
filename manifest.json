@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Image Downloader Explorer",
+  "version": "1.1.0",
+  "description": "Поиск, предварительный просмотр, фильтрация и массовое скачивание изображений с веб-страниц.",
+  "permissions": ["activeTab", "tabs", "storage", "downloads", "scripting", "sidePanel"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Image Downloader Explorer"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

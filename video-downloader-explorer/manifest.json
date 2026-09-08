@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Video Downloader Explorer",
+  "version": "1.0.0",
+  "description": "Поиск, превью, фильтрация и массовое скачивание видео с веб-страниц (HTML5, HLS, DASH, blob, прямые ссылки, встроенные плееры).",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "storage",
+    "downloads",
+    "scripting",
+    "sidePanel",
+    "declarativeNetRequest",
+    "webRequest",
+    "cookies",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Video Downloader Explorer"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

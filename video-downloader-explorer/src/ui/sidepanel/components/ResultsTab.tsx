@@ -42,8 +42,8 @@ export function ResultsTab({ state, panel, visible, matched, selected }: {
       <FiltersBar state={state} send={panel.send} />
 
       <div className="results-meta">
-        <span>Показано: <b>{formatCount(filtered.length)}</b> из <b>{formatCount(visible.length)}</b> (подходит фильтрам: {formatCount(matched)})</span>
-        <span>Выбрано: <b>{formatCount(selected)}</b></span>
+        <span>Показано: <b>{formatCount(filtered.length)}</b>{filtered.length !== state.view.candidates.length ? ` из ${formatCount(state.view.candidates.length)}` : ""}</span>
+        {selected > 0 && <span className="selected-count">Выбрано: <b>{formatCount(selected)}</b></span>}
       </div>
 
       {filtered.length === 0 ? (

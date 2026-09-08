@@ -104,27 +104,34 @@ export function App() {
       </main>
 
       <footer className="app-footer">
-        <div className="counts">
-          <span>Найдено: <b>{formatCount(state.view.candidates.length)}</b></span>
-          <span>Подходит: <b>{formatCount(matched)}</b></span>
-          <span>Выбрано: <b>{formatCount(selected)}</b></span>
+        <div className="footer-counts">
+          {selected > 0 ? (
+            <span className="footer-selected">Выбрано: <b>{formatCount(selected)}</b></span>
+          ) : (
+            <span className="footer-total">Всего: <b>{formatCount(state.view.candidates.length)}</b></span>
+          )}
           {state.view.stats.totalDownloaded > 0 && (
-            <span className="muted">Скачано: {state.view.stats.totalDownloaded} · {formatBytes(state.view.stats.totalBytes)}</span>
+            <span className="footer-stats-tag ok">✅ {formatBytes(state.view.stats.totalBytes)}</span>
           )}
           {state.view.stats.totalFailed > 0 && (
-            <span className="err">Ошибок: {state.view.stats.totalFailed}</span>
+            <span className="footer-stats-tag err">❌ {state.view.stats.totalFailed}</span>
           )}
         </div>
         <div className="footer-buttons">
-          <button className="btn" onClick={() => send({ type: "VDE_PAUSE" })} disabled={!state.busy || state.view.status === "paused"}>Пауза</button>
-          <button className="btn" onClick={() => send({ type: "VDE_RESUME" })} disabled={state.view.status !== "paused"}>Продолжить</button>
+          {(state.busy || state.view.status === "paused") && (
+            state.view.status === "paused" ? (
+              <button className="btn sm" onClick={() => send({ type: "VDE_RESUME" })}>▶ Продолжить</button>
+            ) : (
+              <button className="btn sm" onClick={() => send({ type: "VDE_PAUSE" })}>⏸ Пауза</button>
+            )
+          )}
           <button
             className="btn primary"
             disabled={selected === 0}
             onClick={downloadSelected}
             title="Скачать выбранные (Ctrl+Enter)"
           >
-            ⬇ Скачать ({formatCount(selected)})
+            ⬇ Скачать {selected > 0 ? `(${formatCount(selected)})` : ""}
           </button>
         </div>
       </footer>

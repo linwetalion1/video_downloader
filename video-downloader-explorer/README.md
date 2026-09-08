@@ -26,7 +26,20 @@ Edge MV3-расширение для поиска и скачивания **лю
 
 ---
 
-## Установка и запуск
+## 🍏 Отдельная версия для Google Chrome на macOS
+
+Для пользователей macOS доступен специализированный отдельный билд:
+- 📦 **Скачать готовую сборку (ZIP)**: [video-downloader-explorer-chrome-macos.zip](https://github.com/linwetalion1/video_downloader/releases/download/v1.0.0-chrome-macos/video-downloader-explorer-chrome-macos.zip)
+- 🏷️ **Страница релиза на GitHub**: [Release v1.0.0-chrome-macos](https://github.com/linwetalion1/video_downloader/releases/tag/v1.0.0-chrome-macos)
+- 📄 **Инструкция**: [INSTALL_MACOS.md](file:///c:/Users/ivgol/Desktop/AI%20experiments/video%20downloader/release/chrome-macos/INSTALL_MACOS.md)
+
+### Особенности версии для Mac:
+1. **Файловая система APFS / HFS+ и Unicode NFC**: автоматическая нормализация предотвращает сбои загрузки в Chrome при русских названиях и спецсимволах. Очищены зарезервированные Finder двоеточия `:` и скрывающие начальные точки `.`.
+2. **Горячие клавиши macOS**: нативная поддержка `⌘ + A`, `⌘ + D`, `⌘ + Enter`, `⌘ + F`, `⌘ + L`.
+3. **Chrome Side Panel**: поддержка Chrome 116+ с гарантированным открытием по клику на иконку (`action.onClicked` fallback).
+4. **Быстрая установка**: распакуйте ZIP → `chrome://extensions` → «Режим разработчика» → «Загрузить распакованное».
+
+---
 
 ### Требования
 

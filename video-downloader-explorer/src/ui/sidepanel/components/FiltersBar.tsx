@@ -21,7 +21,8 @@ export function FiltersBar({ state, send }: { state: State; send: (m: PanelToWor
   if (s.excludeBlobs) activeCount++;
   if (s.excludeContainers.length > 0) activeCount++;
 
-  const isQuickAll = s.minHeight === 0 && !s.excludeManifests && !s.excludeContainers.includes("mp4");
+  const isQuickAll = s.minHeight === 0 && s.minDurationSec === 0 && !s.excludeManifests && s.excludeContainers.length === 0;
+  const isQuickLong = s.minDurationSec >= 600;
   const isQuickMp4 = s.excludeContainers.includes("hls") && !s.excludeContainers.includes("mp4");
   const isQuickHls = s.excludeContainers.includes("mp4") && !s.excludeContainers.includes("hls");
   const isQuickHD = s.minHeight === 720;
@@ -33,15 +34,22 @@ export function FiltersBar({ state, send }: { state: State; send: (m: PanelToWor
       <div className="quick-chips">
         <button
           className={`quick-chip ${isQuickAll ? "active" : ""}`}
-          onClick={() => update({ minHeight: 0, excludeContainers: [] })}
+          onClick={() => update({ minHeight: 0, minDurationSec: 0, excludeContainers: [] })}
         >
           Все
+        </button>
+        <button
+          className={`quick-chip ${isQuickLong ? "active" : ""}`}
+          onClick={() => update({ minDurationSec: isQuickLong ? 0 : 600 })}
+          title="Показать только длинные видео и трансляции (от 10 минут), скрывая мелкие стикеры и ролики"
+        >
+          📼 Длинные (&gt;10 мин)
         </button>
         <button
           className={`quick-chip ${isQuickHls ? "active" : ""}`}
           onClick={() => update({ excludeContainers: ["mp4", "webm"] })}
         >
-          HLS / Трансляции
+          HLS / Потоки
         </button>
         <button
           className={`quick-chip ${isQuickMp4 ? "active" : ""}`}

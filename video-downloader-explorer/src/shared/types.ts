@@ -148,6 +148,10 @@ export interface VideoCandidate {
   bitrateKbps?: number;
   codecVideo?: string;
   codecAudio?: string;
+  /** true — это прямой эфир (live stream). */
+  isLive?: boolean;
+  /** Количество HLS/DASH сегментов в потоке. */
+  segmentsCount?: number;
   /** Список HLS‑вариантов (для UI выбора качества). */
   hlsVariants?: HlsVariant[];
   /** Выбранный пользователем вариант HLS/DASH (id варианта). */
@@ -426,6 +430,8 @@ export interface RawVideoCandidate {
   width?: number;
   height?: number;
   bitrateKbps?: number;
+  isLive?: boolean;
+  segmentsCount?: number;
   hlsVariants?: HlsVariant[];
   /** Доп. контекст: readyState, natural, currentSrc chain. */
   context?: Record<string, unknown>;

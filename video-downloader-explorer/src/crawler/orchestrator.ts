@@ -20,7 +20,7 @@ import type {
   ScanOptions, ScanSummary, Settings, Task, TaskCounts, TaskType, UILogEntry, VideoCandidate,
 } from "../shared/types";
 import { PRIORITIES } from "../shared/constants";
-import { canonicalUrl, hostnameOf, uid, variantGroupKey } from "../shared/utils";
+import { canonicalUrl, formatDurationHuman, hostnameOf, isObscureTitle, uid, variantGroupKey } from "../shared/utils";
 import { downloadVideo } from "../media/downloader";
 import { resolveVideoMetadata } from "../media/metadata";
 import { fetchAndParseHls } from "../media/hls";
@@ -133,6 +133,8 @@ export class Crawler {
         durationSec: r.durationSec,
         width: r.width,
         height: r.height,
+        isLive: r.isLive ?? !!(r.context as any)?.isLive,
+        segmentsCount: r.segmentsCount,
         hlsVariants: r.hlsVariants,
         status: "discovered",
         selected: false,
@@ -501,8 +503,49 @@ export class Crawler {
           c.width = best.width ?? c.width;
           c.height = best.height ?? c.height;
           c.bitrateKbps = Math.round(best.bandwidth / 1000);
-          c.message = `HLS master: ${r.variants.length} вариантов, выбран ${best.resolutionLabel}`;
+
+          // Проверяем дочерний медиа-плейлист, чтобы узнать точную длительность, сегменты и live/VOD
+          try {
+            const sub = await fetchAndParseHls(best.url);
+            if (sub.ok) {
+              if (sub.segments && sub.segments.length > 0) {
+                c.segmentsCount = sub.segments.length;
+                const dur = sub.totalDurationSec || Math.round(sub.segments.reduce((acc, s) => acc + (s.duration || 0), 0));
+                if (dur > 0) {
+                  c.durationSec = dur;
+                  c.fileSize = Math.round((best.bandwidth / 8) * dur);
+                }
+              }
+              c.isLive = !sub.isVOD;
+            }
+          } catch { /* ignore */ }
+
+          // Человекочитаемое название: если скрыто или просто "video.m3u8", даём понятное имя
+          if (!c.title || isObscureTitle(c.title)) {
+            const res = best.resolutionLabel || (c.height ? `${c.height}p` : "");
+            const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
+            if (c.isLive) {
+              c.title = `🔴 Прямой эфир ${res}`.trim();
+            } else if (c.durationSec && c.durationSec >= 3600) {
+              c.title = `📼 Трансляция / Запись (${durStr}, ${res})`.trim();
+            } else if (c.durationSec && c.durationSec > 0) {
+              c.title = `Видео (${durStr}, ${res})`.trim();
+            } else {
+              c.title = `Поток HLS (${res})`.trim();
+            }
+          }
+
+          c.message = `HLS: ${r.variants.length} вар., выбран ${best.resolutionLabel}${c.durationSec ? ` · ${formatDurationHuman(c.durationSec)}` : ""}${c.segmentsCount ? ` (${c.segmentsCount} сегм.)` : ""}`;
           this.deps.onEvent({ type: "log", entry: manifestLog.info(`${c.title || c.videoUrl.slice(0, 50)}: HLS → ${r.variants.length} вариантов, выбран ${best.resolutionLabel} (${Math.round(best.bandwidth / 1000)}kbps)`) });
+        } else if (r.ok && !r.isMaster && r.segments) {
+          c.segmentsCount = r.segments.length;
+          const dur = r.totalDurationSec || Math.round(r.segments.reduce((acc, s) => acc + (s.duration || 0), 0));
+          if (dur > 0) c.durationSec = dur;
+          c.isLive = !r.isVOD;
+          if (!c.title || isObscureTitle(c.title)) {
+            const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
+            c.title = c.isLive ? "🔴 Прямой эфир (HLS)" : (c.durationSec && c.durationSec >= 3600 ? `📼 Трансляция (${durStr})` : `Видео HLS (${durStr})`);
+          }
         }
       } else if (c.container === "dash") {
         const r = await fetchAndParseDash(c.videoUrl);
@@ -522,7 +565,21 @@ export class Crawler {
       this.deps.onEvent({ type: "log", entry: manifestLog.error(`Раскрытие манифеста не удалось: ${(e as Error).message}`) });
     }
     c.phase = "done";
-    this.emitCandidateUpdate(c.id, { hlsVariants: c.hlsVariants, selectedVariantId: c.selectedVariantId, videoUrl: c.videoUrl, width: c.width, height: c.height, bitrateKbps: c.bitrateKbps, message: c.message, phase: c.phase });
+    this.emitCandidateUpdate(c.id, {
+      hlsVariants: c.hlsVariants,
+      selectedVariantId: c.selectedVariantId,
+      videoUrl: c.videoUrl,
+      width: c.width,
+      height: c.height,
+      bitrateKbps: c.bitrateKbps,
+      message: c.message,
+      phase: c.phase,
+      durationSec: c.durationSec,
+      fileSize: c.fileSize,
+      title: c.title,
+      isLive: c.isLive,
+      segmentsCount: c.segmentsCount,
+    });
   }
 
   private async runDownload(c: VideoCandidate, task: Task): Promise<void> {
@@ -707,6 +764,9 @@ export class Crawler {
   }
   private candidatePatch(c: VideoCandidate): Partial<VideoCandidate> {
     return {
+      title: c.title,
+      isLive: c.isLive,
+      segmentsCount: c.segmentsCount,
       status: c.status, phase: c.phase, progress: c.progress,
       message: c.message, receivedBytes: c.receivedBytes, fileSize: c.fileSize,
       width: c.width, height: c.height, durationSec: c.durationSec,

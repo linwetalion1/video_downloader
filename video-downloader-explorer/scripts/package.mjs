@@ -135,16 +135,25 @@ function buildZip() {
   return Buffer.from(zipSync(zipObj, { level: 9 }));
 }
 
+function copyDir(src, dest) {
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  for (const f of collectFiles(src)) {
+    const d = path.join(dest, f.rel);
+    mkdirSync(path.dirname(d), { recursive: true });
+    copyFileSync(f.full, d);
+  }
+}
+
 function buildUnpacked() {
-  // Также создаём директорию release/video-downloader-explorer-unpacked/ — копию dist.
   if (!existsSync(dist)) throw new Error("Нет dist/ — сначала выполните npm run build");
   const target = path.join(outDir, "video-downloader-explorer-unpacked");
-  rmSync(target, { recursive: true, force: true });
-  mkdirSync(target, { recursive: true });
-  for (const f of collectFiles(dist)) {
-    const dest = path.join(target, f.rel);
-    mkdirSync(path.dirname(dest), { recursive: true });
-    copyFileSync(f.full, dest);
+  copyDir(dist, target);
+
+  const externalRelease = path.resolve(root, "..", "release", "image-downloader-explorer");
+  if (existsSync(path.dirname(externalRelease))) {
+    copyDir(dist, externalRelease);
+    console.log(`📂 External Unpacked: ${externalRelease}`);
   }
   return target;
 }
@@ -167,6 +176,12 @@ async function main() {
   writeFileSync(zipPath, zip);
   console.log(`📦 ZIP: ${zipPath} (${(zip.length / 1024).toFixed(1)} KB)`);
 
+  const externalZip = path.resolve(root, "..", "release", "image-downloader-explorer.zip");
+  if (existsSync(path.dirname(externalZip))) {
+    writeFileSync(externalZip, zip);
+    console.log(`📦 External ZIP: ${externalZip}`);
+  }
+
   // 4) .crx — опционально
   const edge = findEdge();
   if (edge) {
@@ -175,6 +190,12 @@ async function main() {
       const crxPath = path.join(outDir, "video-downloader-explorer.crx");
       writeFileSync(crxPath, crx);
       console.log(`📦 CRX: ${crxPath} (${(crx.length / 1024).toFixed(1)} KB)`);
+
+      const externalCrx = path.resolve(root, "..", "release", "image-downloader-explorer.crx");
+      if (existsSync(path.dirname(externalCrx))) {
+        writeFileSync(externalCrx, crx);
+        console.log(`📦 External CRX: ${externalCrx}`);
+      }
     } catch (e) {
       console.warn(`⚠️  .crx не собран (${e.message}). Используйте .zip или распакованную папку.`);
     }

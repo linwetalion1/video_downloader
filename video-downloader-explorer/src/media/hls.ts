@@ -23,6 +23,10 @@ export interface HlsParseResult {
   isVOD: boolean;
   /** Плейлист использует fMP4-сегменты (EXT-X-MAP) — выходной контейнер mp4. */
   isFmp4: boolean;
+  /** Суммарная длительность всех сегментов медиа-плейлиста в секундах. */
+  totalDurationSec?: number;
+  /** Количество сегментов. */
+  segmentCount?: number;
   /** Ошибка парсинга. */
   error?: string;
 }
@@ -253,9 +257,16 @@ function parseMedia(lines: string[], baseUrl: string): HlsParseResult {
     }
   }
 
+  let totalDurationSec = 0;
+  for (const s of segments) {
+    if (s.duration) totalDurationSec += s.duration;
+  }
+  totalDurationSec = Math.round(totalDurationSec);
+
   return {
     ok: true, isMaster: false, variants: [], segments,
     isDRM, isEncrypted, isVOD: endlist, keyUri, isFmp4,
+    totalDurationSec, segmentCount: segments.length,
   };
 }
 

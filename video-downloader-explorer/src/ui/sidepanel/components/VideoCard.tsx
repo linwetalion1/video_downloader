@@ -1,6 +1,7 @@
-// Карточка видео в современном чистом дизайне без избыточного шума.
+// Карточка видео с наглядной идентификацией трансляций, эфиров и видео (без скрытых имен).
+import { useState } from "react";
 import type { VideoCandidate } from "../../../shared/types";
-import { formatBytes, formatDuration, formatResolution } from "../../../shared/utils";
+import { formatBytes, formatDuration, formatDurationHuman, formatResolution, isObscureTitle } from "../../../shared/utils";
 
 export function VideoCard({ candidate, onSelect, onAction }: {
   candidate: VideoCandidate;
@@ -8,6 +9,7 @@ export function VideoCard({ candidate, onSelect, onAction }: {
   onAction: (kind: "download" | "open" | "retry" | "cancel" | "rescan" | "variant", payload?: string) => void;
 }) {
   const c = candidate;
+  const [showPreview, setShowPreview] = useState(false);
   const isWorking = c.status === "downloading" || c.status === "checking";
   const isDone = c.status === "downloaded";
   const isFailed = c.status === "failed";
@@ -16,43 +18,97 @@ export function VideoCard({ candidate, onSelect, onAction }: {
   const pct = Math.round((c.progress || 0) * 100);
   const qualityLabel = formatResolution(c.width, c.height) || (c.isManifest ? c.container.toUpperCase() : "");
 
-  // Лаконичная строка сведений: Источник · Формат · Размер
+  // Определение типа медиа для визуальных бейджей
+  const isLive = !!c.isLive;
+  const isLongBroadcast = !isLive && ((c.durationSec && c.durationSec >= 1800) || (c.segmentsCount && c.segmentsCount >= 400));
+  const isSticker = !isLive && c.durationSec !== undefined && c.durationSec > 0 && c.durationSec <= 15 && (c.fileSize ? c.fileSize < 1.5 * 1024 * 1024 : true);
+
+  // Человекочитаемое название
+  let displayTitle = c.title;
+  if (!displayTitle || isObscureTitle(displayTitle)) {
+    const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
+    const res = qualityLabel || c.container.toUpperCase();
+    if (isLive) {
+      displayTitle = `🔴 Прямой эфир (${res})`;
+    } else if (isLongBroadcast) {
+      displayTitle = `📼 Трансляция / Запись (${durStr}${res ? `, ${res}` : ""})`;
+    } else if (c.durationSec && c.durationSec > 0) {
+      displayTitle = `🎬 Видео (${durStr}${res ? `, ${res}` : ""})`;
+    } else {
+      displayTitle = basename(c.videoUrl);
+    }
+  }
+
+  // Наглядная строка сведений: Домен · Формат · Длительность · Сегменты · Размер
   const subInfoParts: string[] = [];
   if (c.sourceDomain) subInfoParts.push(c.sourceDomain);
   if (c.container && c.container !== "unknown") subInfoParts.push(c.container.toUpperCase());
+  if (c.durationSec && c.durationSec > 0) subInfoParts.push(formatDurationHuman(c.durationSec));
+  if (c.segmentsCount && c.segmentsCount > 0) subInfoParts.push(`${c.segmentsCount.toLocaleString("ru-RU")} сегм.`);
   if (c.fileSize && c.fileSize > 0) subInfoParts.push(formatBytes(c.fileSize));
   const subInfo = subInfoParts.join(" · ");
 
   return (
-    <div className={`card ${c.selected ? "selected" : ""} status-${c.status}`}>
-      {/* Превью 16:9 с бейджами качества и длительности */}
-      <div className="card-thumb" onClick={() => onSelect(!c.selected)}>
-        {c.thumbnailUrl ? (
-          <img src={c.thumbnailUrl} alt="" loading="lazy" />
+    <div className={`card ${c.selected ? "selected" : ""} status-${c.status} ${isLive ? "card-live" : isLongBroadcast ? "card-broadcast" : ""}`}>
+      {/* Превью / Инлайн-плеер */}
+      <div className="card-thumb">
+        {showPreview ? (
+          <div className="card-preview-container">
+            <video
+              className="card-inline-video"
+              src={c.videoUrl}
+              controls
+              autoPlay
+              playsInline
+              preload="metadata"
+            />
+            <button
+              className="card-preview-close"
+              onClick={(e) => { e.stopPropagation(); setShowPreview(false); }}
+              title="Закрыть предпросмотр"
+            >
+              ✕
+            </button>
+          </div>
         ) : (
-          <div className="thumb-placeholder">
-            <span className="thumb-icon">▶</span>
+          <div className="card-thumb-click" onClick={() => onSelect(!c.selected)}>
+            {c.thumbnailUrl ? (
+              <img src={c.thumbnailUrl} alt="" loading="lazy" />
+            ) : (
+              <div className="thumb-placeholder">
+                <span className="thumb-icon">{isLive ? "🔴" : isLongBroadcast ? "📼" : "▶"}</span>
+              </div>
+            )}
+            <div className="card-overlay-top">
+              {isLive ? (
+                <span className="badge live">🔴 ПРЯМОЙ ЭФИР</span>
+              ) : isLongBroadcast ? (
+                <span className="badge stream">📼 ТРАНСЛЯЦИЯ</span>
+              ) : isSticker ? (
+                <span className="badge sticker">🖼️ СТИКЕР</span>
+              ) : null}
+              {qualityLabel && <span className={`quality-badge ${c.container}`}>{qualityLabel}</span>}
+              {c.isDRM && <span className="badge drm">DRM</span>}
+            </div>
+            <div className="card-overlay-bottom">
+              {isLive ? (
+                <span className="duration-badge live">🔴 LIVE</span>
+              ) : c.durationSec && c.durationSec > 0 ? (
+                <span className="duration-badge">{formatDuration(c.durationSec)}</span>
+              ) : null}
+            </div>
           </div>
         )}
-        <div className="card-overlay-top">
-          {qualityLabel && <span className={`quality-badge ${c.container}`}>{qualityLabel}</span>}
-          {c.isDRM && <span className="badge drm">DRM</span>}
-        </div>
-        <div className="card-overlay-bottom">
-          {c.durationSec && c.durationSec > 0 && (
-            <span className="duration-badge">{formatDuration(c.durationSec)}</span>
-          )}
-        </div>
       </div>
 
       <div className="card-body">
-        {/* Заголовок */}
+        {/* Человекочитаемый заголовок */}
         <div className="card-title" title={c.title || c.videoUrl}>
-          {c.title || basename(c.videoUrl)}
+          {displayTitle}
         </div>
 
-        {/* Лаконичная подпись источника и размера */}
-        <div className="card-subinfo">
+        {/* Наглядная подпись: Домен · HLS · 9 ч 14 мин · 16 620 сегм. · 4.8 ГБ */}
+        <div className="card-subinfo" title={subInfo}>
           {subInfo || c.sourceType}
         </div>
 
@@ -85,7 +141,7 @@ export function VideoCard({ candidate, onSelect, onAction }: {
 
         {/* Действия */}
         <div className="card-actions">
-          <label className="card-select-label" title="Выбрать для массового скачивания">
+          <label className="card-select-label" title="Выбрать для скачивания">
             <input
               type="checkbox"
               checked={c.selected}
@@ -94,6 +150,15 @@ export function VideoCard({ candidate, onSelect, onAction }: {
           </label>
 
           <div className="card-buttons">
+            {/* Кнопка предпросмотра */}
+            <button
+              className={`btn-icon ${showPreview ? "active" : ""}`}
+              onClick={(e) => { e.stopPropagation(); setShowPreview(!showPreview); }}
+              title={showPreview ? "Скрыть предпросмотр" : "Предпросмотр видео прямо в карточке"}
+            >
+              {showPreview ? "⏹" : "👁️"}
+            </button>
+
             {isDRM ? (
               <span className="card-status-badge drm" title="Защищено DRM">🔒 DRM</span>
             ) : isFailed ? (

@@ -1,6 +1,6 @@
 // Детекторы видео в популярных соцсетях. БЕЗОПАСНО: только чтение public JSON-блобов
 // (которые сами сайты кладут в window или в <script>).
-import { isHttpUrl, normalizeUrl } from "../shared/utils";
+import { isHttpUrl, isObscureTitle, normalizeUrl } from "../shared/utils";
 import type { RawVideoCandidate, SourceType } from "../shared/types";
 
 declare const window: any;
@@ -270,7 +270,13 @@ function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] 
     || doc.querySelector('meta[name="twitter:image"]')?.getAttribute("content")
     || undefined;
 
+  const domTitle = doc.querySelector('.VideoPageInfo__title, .VideoPage__title, h1.VideoHeader__title, .video_item_title, .post_video_title')?.textContent?.trim()
+    || doc.querySelector('.wall_post_text, .post_text, [data-post-id] .wall_text')?.textContent?.trim()?.slice(0, 100);
+
   let pageTitle = ogTitle;
+  if (!pageTitle || isObscureTitle(pageTitle)) {
+    if (domTitle) pageTitle = domTitle;
+  }
   let pageThumb = ogThumb;
   let pageDurationSec: number | undefined;
 
@@ -314,6 +320,7 @@ function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] 
       title: opts.title || pageTitle,
       thumbnailUrl: opts.thumb || pageThumb,
       durationSec: opts.duration ?? pageDurationSec,
+      isLive: !!opts.isLive,
       context: { isLive: !!opts.isLive },
     });
   };
@@ -336,22 +343,24 @@ function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] 
       if (vObj.thumb) pageThumb = vObj.thumb;
       if (vObj.duration) pageDurationSec = Number(vObj.duration);
 
+      const isLiveObj = vObj.is_live === 1 || vObj.is_live === true || vObj.live === 1 || vObj.status === "live";
+
       // files: { mp4_720: "...", hls: "...", dash: "..." }
       if (vObj.files && typeof vObj.files === "object") {
         for (const [k, u] of Object.entries(vObj.files)) {
           if (typeof u !== "string" || !u) continue;
-          if (k === "hls") tryAdd(u, { container: "hls" });
-          else if (k === "dash") tryAdd(u, { container: "dash" });
+          if (k === "hls") tryAdd(u, { container: "hls", isLive: isLiveObj });
+          else if (k === "dash") tryAdd(u, { container: "dash", isLive: isLiveObj });
           else {
             const m = /(\d{3,4})/.exec(k);
             const h = m ? parseInt(m[1], 10) : undefined;
-            tryAdd(u, { height: h, container: "mp4" });
+            tryAdd(u, { height: h, container: "mp4", isLive: isLiveObj });
           }
         }
       }
-      if (vObj.hls) tryAdd(vObj.hls, { container: "hls" });
-      if (vObj.dash) tryAdd(vObj.dash, { container: "dash" });
-      if (vObj.video_url) tryAdd(vObj.video_url);
+      if (vObj.hls) tryAdd(vObj.hls, { container: "hls", isLive: isLiveObj });
+      if (vObj.dash) tryAdd(vObj.dash, { container: "dash", isLive: isLiveObj });
+      if (vObj.video_url) tryAdd(vObj.video_url, { isLive: isLiveObj });
     }
   } catch { /* ignore */ }
 
@@ -361,7 +370,7 @@ function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] 
     if (!t) return;
 
     // Извлечение названия и превью из скрипта, если ещё нет
-    if (!pageTitle) {
+    if (!pageTitle || isObscureTitle(pageTitle)) {
       const tm = /"md_title"\s*:\s*"([^"]+)"/.exec(t) || /"title"\s*:\s*"([^"]+)"/.exec(t);
       if (tm && tm[1].length > 1) {
         try { pageTitle = decodeURIComponent(JSON.parse(`"${tm[1]}"`)); } catch { pageTitle = tm[1]; }
@@ -376,12 +385,14 @@ function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] 
       if (dm) pageDurationSec = parseInt(dm[1], 10);
     }
 
+    const isLiveInScript = /"is_live"\s*:\s*(?:1|true)|"live"\s*:\s*1|"status"\s*:\s*"live"/i.test(t);
+
     // HLS-потоки для трансляций и VOD (hls, hls_live, hls_live_playback, live_playback, hls_ondemand, hls_vod, live, manifestUrl)
     for (const hKey of ["hls_live_playback", "live_playback", "hls_live", "hls_ondemand", "hls_vod", "hls", "manifestUrl", "live"]) {
       const re = new RegExp(`"${hKey}"\\s*:\\s*"([^"]+)"`, "g");
       let m: RegExpExecArray | null;
       while ((m = re.exec(t)) !== null) {
-        tryAdd(m[1], { container: "hls", isLive: /live/i.test(hKey) });
+        tryAdd(m[1], { container: "hls", isLive: /live/i.test(hKey) || isLiveInScript });
       }
     }
 

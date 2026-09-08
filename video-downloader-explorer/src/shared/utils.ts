@@ -217,6 +217,7 @@ export function formatCount(n: number): string {
 
 export function formatDuration(sec?: number | null): string {
   if (sec === undefined || sec === null || isNaN(sec) || !isFinite(sec) || sec < 0) return "—";
+  const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
   const total = Math.round(sec);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
@@ -225,8 +226,25 @@ export function formatDuration(sec?: number | null): string {
   return `${m}:${pad(s)}`;
 }
 
-function pad(n: number): string {
-  return n.toString().padStart(2, "0");
+export function formatDurationHuman(sec?: number | null): string {
+  if (sec === undefined || sec === null || isNaN(sec) || !isFinite(sec) || sec <= 0) return "";
+  const total = Math.round(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h} ч ${m} мин`;
+  if (m > 0) return `${m} мин ${s} с`;
+  return `${s} с`;
+}
+
+export function isObscureTitle(title?: string | null): boolean {
+  if (!title) return true;
+  const t = title.trim().toLowerCase();
+  if (t === "video" || t === "video.m3u8" || t === "master.m3u8" || t === "index.m3u8" || t === "playlist.m3u8") return true;
+  if (t === "стена | вконтакте" || t === "вконтакте" || t === "vk" || t === "видеозаписи" || t === "стена") return true;
+  if (/^dash_[\d_.]+\.mpd$/i.test(t) || /^hls_[\d_.]+\.m3u8$/i.test(t)) return true;
+  if (/^expires\/\d+/i.test(t)) return true;
+  return false;
 }
 
 export function formatBitrate(kbps?: number | null): string {

@@ -23,6 +23,7 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
   // Манифесты YouTube часто БЕЗ расширения: /api/manifest/hls_playlist/id/…
   const MANIFEST_PATH_RE = /\/api\/manifest\/(hls_playlist|dash)\//i;
   const VIDEOPLAYBACK_RE = /googlevideo\.com\/(videoplayback|api\/manifest)/i;
+  const VK_MEDIA_RE = /(?:vkvideo\.ru|vkuservideo\.net|mycdn\.me|vk\.me)\/.*?(?:m3u8|mpd|mp4|\/hls\/|\/live\/)/i;
 
   function report(url: string, mime?: string): void {
     try {
@@ -30,7 +31,7 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
       if (!u.startsWith("http")) return;
       // JSON часто содержит экранированные слэши.
       const probe = u.replace(/\\\//g, "/");
-      if (!MEDIA_RE.test(probe) && !MANIFEST_PATH_RE.test(probe) && !VIDEOPLAYBACK_RE.test(probe)) return;
+      if (!MEDIA_RE.test(probe) && !MANIFEST_PATH_RE.test(probe) && !VIDEOPLAYBACK_RE.test(probe) && !VK_MEDIA_RE.test(probe)) return;
       u = probe.split("#")[0];
       if (seen.has(u) && buffer.length < MAX_BUFFER) return;
       seen.add(u);
@@ -52,12 +53,15 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
       while ((g = gre.exec(t)) !== null) report(g[0], mime);
       const mre = /https?:\/\/[^\s"'<>\\)]*?\/api\/manifest\/(?:hls_playlist|dash)\/[^\s"'<>\\)]*/gi;
       while ((m = mre.exec(t)) !== null) report(m[0], mime);
+      const vkre = /https?:\/\/[^\s"'<>\\)]+?(?:vkvideo\.ru|vkuservideo\.net|mycdn\.me|vk\.me)[^\s"'<>\\)]*?(?:m3u8|mpd|\/hls\/|\/live\/)[^\s"'<>\\)]*/gi;
+      while ((m = vkre.exec(t)) !== null) report(m[0], mime);
     } catch { /* ignore */ }
   }
 
   function looksManifestish(url: string): boolean {
     return /\.m3u8(\?|$)/i.test(url) || /\.mpd(\?|$)/i.test(url)
-      || /format=m3u8/i.test(url) || MANIFEST_PATH_RE.test(url);
+      || /format=m3u8/i.test(url) || /\/hls\//i.test(url) || MANIFEST_PATH_RE.test(url)
+      || VK_MEDIA_RE.test(url);
   }
 
   function classifyAndReport(url: string, mime?: string, bodyText?: string | null): void {

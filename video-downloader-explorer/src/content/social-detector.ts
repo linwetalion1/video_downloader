@@ -7,7 +7,7 @@ declare const window: any;
 
 export function detectSocialVideos(pageUrl: string, doc: Document): RawVideoCandidate[] {
   const out: RawVideoCandidate[] = [];
-  const w = window;
+  const w = (doc as any).defaultView || window;
   const h = pageUrl.toLowerCase();
 
   // YouTube
@@ -256,23 +256,174 @@ function detectRutube(w: any, _pageUrl: string, doc: Document): RawVideoCandidat
   return out;
 }
 
-function detectVK(_w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] {
+function detectVK(w: any, _pageUrl: string, doc: Document): RawVideoCandidate[] {
   const out: RawVideoCandidate[] = [];
   const seen = new Set<string>();
-  const tryAdd = (url: string, mime?: string) => {
-    if (!url || seen.has(url)) return;
-    seen.add(url);
-    out.push({ videoUrl: url, sourceType: "vk", container: /\.m3u8/i.test(url) ? "hls" : "mp4", mimeType: mime, isManifest: /\.m3u8/i.test(url) });
+
+  // Общие метаданные страницы
+  const ogTitle = doc.querySelector('meta[property="og:title"]')?.getAttribute("content")
+    || doc.querySelector('meta[name="twitter:title"]')?.getAttribute("content")
+    || doc.title?.replace(/\s*\|\s*(ВКонтакте|VK|VK Видео).*$/i, "").trim()
+    || undefined;
+
+  const ogThumb = doc.querySelector('meta[property="og:image"]')?.getAttribute("content")
+    || doc.querySelector('meta[name="twitter:image"]')?.getAttribute("content")
+    || undefined;
+
+  let pageTitle = ogTitle;
+  let pageThumb = ogThumb;
+  let pageDurationSec: number | undefined;
+
+  const cleanUrl = (u: string) => {
+    let s = u.replace(/\\\//g, "/").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    if (s.startsWith("//")) s = "https:" + s;
+    return s;
   };
+
+  const tryAdd = (
+    rawUrl: string,
+    opts: {
+      mime?: string;
+      container?: "mp4" | "hls" | "dash" | "webm";
+      width?: number;
+      height?: number;
+      title?: string;
+      thumb?: string;
+      duration?: number;
+      isLive?: boolean;
+    } = {}
+  ) => {
+    if (!rawUrl) return;
+    const url = cleanUrl(rawUrl);
+    if (!isHttpUrl(url) || seen.has(url)) return;
+    seen.add(url);
+
+    const isHls = /\.m3u8(\?|$)/i.test(url) || /\/hls\//i.test(url) || opts.container === "hls";
+    const isDash = /\.mpd(\?|$)/i.test(url) || opts.container === "dash";
+    const container = isHls ? "hls" : isDash ? "dash" : (opts.container || "mp4");
+    const mime = opts.mime || (isHls ? "application/x-mpegurl" : isDash ? "application/dash+xml" : "video/mp4");
+
+    out.push({
+      videoUrl: url,
+      sourceType: "vk",
+      container,
+      mimeType: mime,
+      isManifest: isHls || isDash,
+      width: opts.width,
+      height: opts.height,
+      title: opts.title || pageTitle,
+      thumbnailUrl: opts.thumb || pageThumb,
+      durationSec: opts.duration ?? pageDurationSec,
+      context: { isLive: !!opts.isLive },
+    });
+  };
+
+  // 1) Анализ глобальных объектов (w.__NEXT_DATA__, w.__INITIAL_STATE__, w.cur)
+  try {
+    let nextData = w.__NEXT_DATA__?.props?.pageProps || w.__NEXT_DATA__?.props?.initialState;
+    if (!nextData) {
+      const el = doc.getElementById("__NEXT_DATA__");
+      if (el?.textContent) {
+        try {
+          const j = JSON.parse(el.textContent);
+          nextData = j?.props?.pageProps || j?.props?.initialState;
+        } catch { /* ignore */ }
+      }
+    }
+    const vObj = nextData?.video || nextData?.videoItem || nextData?.initialVideo;
+    if (vObj) {
+      if (vObj.title) pageTitle = vObj.title;
+      if (vObj.thumb) pageThumb = vObj.thumb;
+      if (vObj.duration) pageDurationSec = Number(vObj.duration);
+
+      // files: { mp4_720: "...", hls: "...", dash: "..." }
+      if (vObj.files && typeof vObj.files === "object") {
+        for (const [k, u] of Object.entries(vObj.files)) {
+          if (typeof u !== "string" || !u) continue;
+          if (k === "hls") tryAdd(u, { container: "hls" });
+          else if (k === "dash") tryAdd(u, { container: "dash" });
+          else {
+            const m = /(\d{3,4})/.exec(k);
+            const h = m ? parseInt(m[1], 10) : undefined;
+            tryAdd(u, { height: h, container: "mp4" });
+          }
+        }
+      }
+      if (vObj.hls) tryAdd(vObj.hls, { container: "hls" });
+      if (vObj.dash) tryAdd(vObj.dash, { container: "dash" });
+      if (vObj.video_url) tryAdd(vObj.video_url);
+    }
+  } catch { /* ignore */ }
+
+  // 2) Сканирование всех <script>
   doc.querySelectorAll("script").forEach((s) => {
     const t = s.textContent || "";
-    // url240, url360, url480, url720, url1080
+    if (!t) return;
+
+    // Извлечение названия и превью из скрипта, если ещё нет
+    if (!pageTitle) {
+      const tm = /"md_title"\s*:\s*"([^"]+)"/.exec(t) || /"title"\s*:\s*"([^"]+)"/.exec(t);
+      if (tm && tm[1].length > 1) {
+        try { pageTitle = decodeURIComponent(JSON.parse(`"${tm[1]}"`)); } catch { pageTitle = tm[1]; }
+      }
+    }
+    if (!pageThumb) {
+      const pm = /"thumb"\s*:\s*"([^"]+)"/.exec(t) || /"jpg"\s*:\s*"([^"]+)"/.exec(t);
+      if (pm) pageThumb = cleanUrl(pm[1]);
+    }
+    if (!pageDurationSec) {
+      const dm = /"duration"\s*:\s*(\d+)/.exec(t);
+      if (dm) pageDurationSec = parseInt(dm[1], 10);
+    }
+
+    // HLS-потоки для трансляций и VOD (hls, hls_live, hls_live_playback, live_playback, hls_ondemand, hls_vod, live, manifestUrl)
+    for (const hKey of ["hls_live_playback", "live_playback", "hls_live", "hls_ondemand", "hls_vod", "hls", "manifestUrl", "live"]) {
+      const re = new RegExp(`"${hKey}"\\s*:\\s*"([^"]+)"`, "g");
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(t)) !== null) {
+        tryAdd(m[1], { container: "hls", isLive: /live/i.test(hKey) });
+      }
+    }
+
+    // DASH-потоки
+    for (const dKey of ["dash_live_playback", "dash_live", "dash_ondemand", "dash_uni", "dash"]) {
+      const re = new RegExp(`"${dKey}"\\s*:\\s*"([^"]+)"`, "g");
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(t)) !== null) {
+        tryAdd(m[1], { container: "dash" });
+      }
+    }
+
+    // Прогрессивные MP4 (url240, url360, url480, url720, url1080, url1440, url2160)
     for (const q of ["url240", "url360", "url480", "url720", "url1080", "url1440", "url2160"]) {
-      const re = new RegExp(`"${q}"\\s*:\\s*"([^"]+)"`);
-      const m = re.exec(t);
-      if (m) tryAdd(m[1].replace(/\\\//g, "/"), "video/mp4");
+      const re = new RegExp(`"${q}"\\s*:\\s*"([^"]+)"`, "g");
+      const h = parseInt(q.replace("url", ""), 10) || undefined;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(t)) !== null) {
+        tryAdd(m[1], { height: h, container: "mp4" });
+      }
+    }
+
+    // Прямой поиск CDN m3u8/mpd/mp4 ссылок ВКонтакте в тексте скрипта
+    const cdnRe = /https?:\/\/[^\s"'<>\\)]+?(?:vkvideo\.ru|vkuservideo\.net|mycdn\.me|vk\.me|userapi\.com)[^\s"'<>\\)]*?\.(?:m3u8|mpd|mp4)(?:\?[^\s"'<>\\)]*)?/gi;
+    let cm: RegExpExecArray | null;
+    while ((cm = cdnRe.exec(t)) !== null) {
+      tryAdd(cm[0]);
     }
   });
+
+  // 3) <video> теги на странице (когда воспроизведение запущено)
+  doc.querySelectorAll("video").forEach((v) => {
+    const src = v.getAttribute("src") || v.currentSrc;
+    if (src && !src.startsWith("blob:") && isHttpUrl(src)) {
+      tryAdd(src);
+    }
+    v.querySelectorAll("source").forEach((s) => {
+      const u = s.getAttribute("src");
+      if (u && isHttpUrl(u)) tryAdd(u);
+    });
+  });
+
   return out;
 }
 

@@ -495,7 +495,12 @@ async function fetchBlobDownload(
   hintUrl?: string
 ): Promise<{ id?: number; error?: string; retryable?: boolean; bytes?: number }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10 * 60_000); // 10 минут
+  // Адаптивный таймаут неактивности (сбрасывается при получении данных)
+  let activityTimer = setTimeout(() => controller.abort(), 90_000);
+  const touch = () => {
+    clearTimeout(activityTimer);
+    activityTimer = setTimeout(() => controller.abort(), 90_000);
+  };
   if (signal) signal.addEventListener("abort", () => controller.abort(), { once: true });
   try {
     const resp = await fetch(url, {
@@ -575,6 +580,7 @@ async function fetchBlobDownload(
     if (reader) {
       for (;;) {
         const { done, value } = await reader.read();
+        touch();
         if (done) break;
         if (value) {
           chunks.push(value);
@@ -589,6 +595,7 @@ async function fetchBlobDownload(
       }
     } else {
       const buf = await resp.arrayBuffer();
+      touch();
       chunks.push(new Uint8Array(buf));
       received = buf.byteLength;
     }
@@ -610,7 +617,7 @@ async function fetchBlobDownload(
     downloadLog.warn(`fetch+blob: ошибка сети/таймаут (${name}): ${(e as Error).message}`);
     return { error: `fetch fallback: ${(e as Error).message}`, retryable: false };
   } finally {
-    clearTimeout(timer);
+    clearTimeout(activityTimer);
   }
 }
 
@@ -711,25 +718,87 @@ async function downloadMergedHls(
   params: DownloadParams,
   quality: string
 ): Promise<DownloadResult> {
+  const isFmp4 = segments.some((s) => s.isInit);
+  const ext = isFmp4 ? "mp4" : "ts";
+  const filename = buildFilename(candidate, params.options).replace(/\.[^.]+$/, "") + `__${quality}.${ext}`;
+  const path = `${buildPath(candidate, params.options)}/${filename}`;
+  const mime = isFmp4 ? "video/mp4" : "video/mp2t";
+
   params.setPhase?.("downloading");
   params.setMessage?.(`Скачиваем ${segments.length} сегментов HLS…`);
+
+  // Путь 1: Загрузка прямо в offscreen document (без передачи гигабайтов через IPC)
+  const progressListener = (msg: any) => {
+    if (msg?.type === "OFFSCREEN_HLS_PROGRESS") {
+      params.onProgress?.(msg.received, msg.total);
+      params.setMessage?.(`HLS: ${(msg.received / 1024 / 1024).toFixed(1)} MB (${msg.total} сегм.)`);
+    }
+  };
+  chrome.runtime.onMessage.addListener(progressListener);
+
+  try {
+    const offResult = await withOffscreen(async () => {
+      return (await chrome.runtime.sendMessage({
+        type: "OFFSCREEN_DOWNLOAD_HLS",
+        segments,
+        baseUrl: candidate.videoUrl,
+        filename: path,
+        mime,
+      })) as { ok: boolean; error?: string; bytes?: number };
+    });
+
+    if (offResult && typeof offResult === "object" && "ok" in offResult && offResult.ok) {
+      downloadLog.info(`✓ ${path} (HLS через offscreen, ${((offResult.bytes || 0) / 1024 / 1024).toFixed(1)} MB)`);
+      return { ok: true, filename: path, bytes: offResult.bytes };
+    }
+    if (offResult && typeof offResult === "object" && "ok" in offResult && !offResult.ok && offResult.error) {
+      downloadLog.warn(`offscreen HLS (${offResult.error}) — пробуем fallback через SW`);
+    }
+  } catch (err) {
+    downloadLog.warn(`offscreen HLS вызов завершился с ошибкой (${(err as Error).message}) — пробуем fallback`);
+  } finally {
+    try { chrome.runtime.onMessage.removeListener(progressListener); } catch { /* */ }
+  }
+
+  // Путь 2: Fallback через SW
   try {
     const blob = await downloadHlsSegments(segments, candidate.videoUrl, undefined, (received, total) => {
       params.onProgress?.(received, total);
       params.setMessage?.(`HLS: ${(received / 1024 / 1024).toFixed(1)} MB`);
     }, params.signal);
     params.setPhase?.("merging");
-    params.setMessage?.("Склеиваем в один файл…");
-    const buf = new Uint8Array(await blob.arrayBuffer());
-    const isFmp4 = blob.type.includes("mp4");
-    const ext = isFmp4 ? "mp4" : "ts";
-    const filename = buildFilename(candidate, params.options).replace(/\.[^.]+$/, "") + `__${quality}.${ext}`;
-    const path = `${buildPath(candidate, params.options)}/${filename}`;
-    const saved = await saveBytesToFile(buf, path, blob.type);
-    if (!saved.ok) {
-      return { ok: false, error: saved.error || "сохранение не удалось", errorCode: "DOWNLOAD", retryable: false };
+    params.setMessage?.("Сохраняем файл…");
+
+    // Если файл мал — сохраняем через data: URL
+    if (blob.size <= DATA_URL_MAX) {
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      const saved = await saveBytesToFile(buf, path, blob.type);
+      if (!saved.ok) {
+        return { ok: false, error: saved.error || "сохранение не удалось", errorCode: "DOWNLOAD", retryable: false };
+      }
+      return { ok: true, filename: path, bytes: blob.size };
     }
-    return { ok: true, filename: path, bytes: buf.byteLength };
+
+    // Для больших файлов разбиваем на чанки потоково из Blob-среза
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+    const totalChunks = Math.ceil(blob.size / CHUNK_SIZE);
+    const jobId = uid("o");
+
+    const chunkOk = await withOffscreen(async () => {
+      for (let i = 0; i < totalChunks; i++) {
+        const slice = blob.slice(i * CHUNK_SIZE, Math.min(blob.size, (i + 1) * CHUNK_SIZE));
+        const chunkBuf = await slice.arrayBuffer();
+        const r = await sendChunkToOffscreen(jobId, i, totalChunks, new Uint8Array(chunkBuf));
+        if (!r.ok) return { ok: false, error: r.error };
+      }
+      return commitOffscreen(jobId, path, blob.type);
+    });
+
+    if (chunkOk && typeof chunkOk === "object" && "ok" in chunkOk && chunkOk.ok) {
+      return { ok: true, filename: path, bytes: blob.size };
+    }
+
+    return { ok: false, error: (chunkOk as any)?.error || "сохранение не удалось", errorCode: "DOWNLOAD", retryable: false };
   } catch (e) {
     if (params.signal?.aborted || (e as Error).message === "Aborted") {
       return { ok: false, error: "Отменено", errorCode: "ABORTED", retryable: false };

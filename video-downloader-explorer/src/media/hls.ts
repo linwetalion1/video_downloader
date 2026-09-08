@@ -48,7 +48,7 @@ export interface HlsKeyInfo {
   iv?: string;
 }
 
-const MAX_SEGMENTS = 20_000;
+const MAX_SEGMENTS = 120_000;
 
 export function parseHls(text: string, baseUrl: string): HlsParseResult {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -328,92 +328,157 @@ async function aesCbcDecryptNoPad(rawKey: ArrayBuffer, iv: Uint8Array, data: Uin
   padded.set(data.subarray(0, data.length));
   padded.set(data.subarray(data.length - 16), data.length);
   const buf = await cryptoObj.subtle.decrypt({ name: "AES-CBC", iv: iv as unknown as BufferSource }, key, padded);
-  return new Uint8Array(buf).subarray(0, data.length);
+  return new Uint8Array(buf.slice(0, data.length));
 }
 
 /** Скачивает все сегменты в один файл. Init-сегменты включаются первыми байтами,
- *  AES-128 расшифровывается, byteRange уходит в Range-заголовок. */
+ *  AES-128 расшифровывается, byteRange уходит в Range-заголовок.
+ *  Поддерживает параллельную загрузку с сохранением порядка сегментов
+ *  и потоковую группировку в Blob во избежание V8 heap OOM на файлах 10+ ГБ. */
 export async function downloadHlsSegments(
   segments: HlsSegmentInfo[],
   baseUrl: string,
   fetcher: typeof fetch = fetch,
   onProgress?: (received: number, total: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  concurrency = 5
 ): Promise<Blob> {
-  manifestLog.info(`HLS download: ${segments.length} сегментов`);
-  const parts: Uint8Array[] = [];
-  let received = 0;
   const keyCache = new Map<string, ArrayBuffer>();
   const emittedInits = new Set<string>();
   let sawFmp4 = false;
 
-  const fetchSeg = async (seg: HlsSegmentInfo): Promise<Uint8Array> => {
-    let attempt = 0;
-    for (;;) {
-      try {
-        const headers: Record<string, string> = {};
-        if (seg.byteRange && seg.byteRange.start >= 0) headers["Range"] = `bytes=${seg.byteRange.start}-${seg.byteRange.start + seg.byteRange.length - 1}`;
-        const resp = await fetcher(seg.url, { headers, signal });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return new Uint8Array(await resp.arrayBuffer());
-      } catch (e) {
-        if (signal?.aborted) throw e;
-        attempt++;
-        if (attempt >= 2) throw e;
-        await new Promise((r) => setTimeout(r, 500 * attempt));
-      }
-    }
-  };
-
-  for (let i = 0; i < segments.length; i++) {
-    if (signal?.aborted) throw new Error("Aborted");
-    const seg = segments[i];
+  // Отфильтровываем дублирующиеся init-сегменты
+  const cleanSegments: HlsSegmentInfo[] = [];
+  for (const seg of segments) {
     const segUrl = normalizeUrl(seg.url, baseUrl) ?? seg.url;
-
-    // Init-сегмент fMP4: обязателен первым байтом файла, повторяющиеся пропускаем.
     if (seg.isInit) {
       sawFmp4 = true;
       if (emittedInits.has(segUrl)) continue;
       emittedInits.add(segUrl);
     }
-
-    manifestLog.debug(`HLS seg[${i + 1}/${segments.length}]: ${segUrl} (${seg.duration}s${seg.key?.method ? ", " + seg.key.method : ""})`);
-
-    let bytes: Uint8Array;
-    try {
-      bytes = await fetchSeg({ ...seg, url: segUrl });
-    } catch (e) {
-      if (signal?.aborted) throw new Error("Aborted");
-      // Инициализацию пропустить нельзя — файл будет невалиден.
-      if (seg.isInit) throw new Error(`init-сегмент недоступен: ${(e as Error).message}`);
-      manifestLog.error(`HLS seg[${i + 1}]: ${(e as Error).message} — сегмент пропущен`);
-      continue;
-    }
-
-    if (seg.key?.method === "AES-128") {
-      try {
-        if (!seg.key.uri) throw new Error("нет URI ключа");
-        let raw = keyCache.get(seg.key.uri);
-        if (!raw) {
-          const kResp = await fetcher(seg.key.uri, { signal });
-          if (!kResp.ok) throw new Error(`ключ → HTTP ${kResp.status}`);
-          raw = await kResp.arrayBuffer();
-          keyCache.set(seg.key.uri, raw);
-        }
-        const ivHex = seg.key.iv ? seg.key.iv.replace(/^0[xX]/, "") : undefined;
-        const iv = ivHex ? hexToBytes(ivHex) : seqToIv(seg.seq);
-        bytes = await aesCbcDecryptNoPad(raw, iv, bytes);
-      } catch (e) {
-        throw new Error(`AES-128: ${(e as Error).message} (сегмент ${i + 1})`);
-      }
-    }
-
-    parts.push(bytes);
-    received += bytes.byteLength;
-    onProgress?.(received, -1);
+    cleanSegments.push({ ...seg, url: segUrl });
   }
 
-  if (parts.length === 0) throw new Error("ни одного сегмента не скачано");
+  const totalSegments = cleanSegments.length;
+  if (totalSegments === 0) throw new Error("нет сегментов для скачивания");
+
+  manifestLog.info(`HLS download: ${totalSegments} сегментов, concurrency=${concurrency}`);
+
+  const results: (Uint8Array | null)[] = new Array(totalSegments).fill(null);
+  let receivedBytes = 0;
+  let nextIdx = 0;
+  let activeWorkers = 0;
+
+  const fetchKey = async (uri: string): Promise<ArrayBuffer> => {
+    let raw = keyCache.get(uri);
+    if (!raw) {
+      const resp = await fetcher(uri, { signal });
+      if (!resp.ok) throw new Error(`ключ AES-128 → HTTP ${resp.status}`);
+      raw = await resp.arrayBuffer();
+      keyCache.set(uri, raw);
+    }
+    return raw;
+  };
+
+  const fetchSegWithRetry = async (seg: HlsSegmentInfo, _segIdx: number): Promise<Uint8Array> => {
+    let attempt = 0;
+    for (;;) {
+      try {
+        const headers: Record<string, string> = {};
+        if (seg.byteRange && seg.byteRange.start >= 0) {
+          headers["Range"] = `bytes=${seg.byteRange.start}-${seg.byteRange.start + seg.byteRange.length - 1}`;
+        }
+        const resp = await fetcher(seg.url, { headers, signal });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        let bytes: Uint8Array<any> = new Uint8Array(await resp.arrayBuffer());
+
+        if (seg.key?.method === "AES-128") {
+          if (!seg.key.uri) throw new Error("нет URI ключа");
+          const rawKey = await fetchKey(seg.key.uri);
+          const ivHex = seg.key.iv ? seg.key.iv.replace(/^0[xX]/, "") : undefined;
+          const iv = ivHex ? hexToBytes(ivHex) : seqToIv(seg.seq);
+          bytes = await aesCbcDecryptNoPad(rawKey, iv, bytes);
+        }
+
+        return bytes as Uint8Array;
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        attempt++;
+        if (attempt >= 3) throw e;
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
+    }
+  };
+
+  // Рабочий пул параллельных загрузок
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("Aborted"));
+    let rejected = false;
+
+    const spawnWorker = () => {
+      if (rejected) return;
+      if (nextIdx >= totalSegments) {
+        if (activeWorkers === 0) resolve();
+        return;
+      }
+
+      const idx = nextIdx++;
+      const seg = cleanSegments[idx];
+      activeWorkers++;
+
+      fetchSegWithRetry(seg, idx)
+        .then((bytes) => {
+          results[idx] = bytes;
+          receivedBytes += bytes.byteLength;
+          onProgress?.(receivedBytes, totalSegments);
+        })
+        .catch((err) => {
+          if (signal?.aborted || (err as Error).message === "Aborted") {
+            rejected = true;
+            return reject(new Error("Aborted"));
+          }
+          if (seg.isInit) {
+            rejected = true;
+            return reject(new Error(`init-сегмент недоступен: ${(err as Error).message}`));
+          }
+          manifestLog.warn(`HLS seg[${idx + 1}/${totalSegments}]: ${(err as Error).message} — пропущен`);
+          results[idx] = null;
+        })
+        .finally(() => {
+          activeWorkers--;
+          if (!rejected) spawnWorker();
+        });
+    };
+
+    const count = Math.min(concurrency, totalSegments);
+    for (let i = 0; i < count; i++) {
+      spawnWorker();
+    }
+  });
+
+  // Собираем в Blobs порциями по 16 МБ для исключения переполнения непрерывной V8 кучи
+  const blobParts: Blob[] = [];
+  const BATCH_BYTES = 16 * 1024 * 1024;
+  let curBatch: BlobPart[] = [];
+  let curBytes = 0;
   const mime = sawFmp4 ? "video/mp4" : "video/mp2t";
-  return new Blob(parts as BlobPart[], { type: mime });
+
+  for (let i = 0; i < results.length; i++) {
+    const p = results[i];
+    results[i] = null; // освобождаем для сборщика мусора
+    if (!p) continue;
+    curBatch.push(p as unknown as BlobPart);
+    curBytes += p.byteLength;
+    if (curBytes >= BATCH_BYTES) {
+      blobParts.push(new Blob(curBatch, { type: mime }));
+      curBatch = [];
+      curBytes = 0;
+    }
+  }
+  if (curBatch.length > 0) {
+    blobParts.push(new Blob(curBatch, { type: mime }));
+  }
+
+  if (blobParts.length === 0) throw new Error("ни одного сегмента не скачано");
+  return new Blob(blobParts, { type: mime });
 }

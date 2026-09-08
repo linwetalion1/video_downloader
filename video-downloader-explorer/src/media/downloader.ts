@@ -364,11 +364,11 @@ async function sendChunkToOffscreen(
   return resp?.ok ? { ok: true } : { ok: false, error: resp?.error || "offscreen не принял чанк" };
 }
 
-async function commitOffscreen(jobId: string, path: string, mime: string): Promise<{ ok: boolean; error?: string }> {
+async function commitOffscreen(jobId: string, path: string, mime: string): Promise<{ ok: boolean; objectUrl?: string; error?: string; bytes?: number }> {
   const done = await chrome.runtime.sendMessage({
     type: "OFFSCREEN_SAVE_COMMIT", jobId, filename: path, mime,
   });
-  return done?.ok ? { ok: true } : { ok: false, error: done?.error || "сохранение не завершено" };
+  return done as any;
 }
 
 async function saveViaOffscreen(
@@ -385,7 +385,14 @@ async function saveViaOffscreen(
       const r = await sendChunkToOffscreen(jobId, i, count, part);
       if (!r.ok) return { ok: false, error: r.error };
     }
-    return commitOffscreen(jobId, path, mime);
+    const commitRes = await commitOffscreen(jobId, path, mime);
+    if (!commitRes.ok || !commitRes.objectUrl) {
+      return { ok: false, error: commitRes.error || "сохранение не завершено" };
+    }
+    const dlRes = await directDownload(commitRes.objectUrl, path, "uniquify", 1_800_000);
+    chrome.runtime.sendMessage({ type: "OFFSCREEN_REVOKE_URL", url: commitRes.objectUrl }).catch(() => {});
+    if (dlRes.error) return { ok: false, error: dlRes.error };
+    return { ok: true };
   }) as Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -738,13 +745,29 @@ async function downloadMergedHls(
 
   try {
     const offResult = await withOffscreen(async () => {
-      return (await chrome.runtime.sendMessage({
+      const resp = (await chrome.runtime.sendMessage({
         type: "OFFSCREEN_DOWNLOAD_HLS",
         segments,
         baseUrl: candidate.videoUrl,
         filename: path,
         mime,
-      })) as { ok: boolean; error?: string; bytes?: number };
+      })) as { ok: boolean; objectUrl?: string; error?: string; bytes?: number };
+
+      if (!resp?.ok || !resp.objectUrl) {
+        return { ok: false, error: resp?.error || "offscreen не вернул данные" };
+      }
+
+      downloadLog.info(`HLS скачан в offscreen (${((resp.bytes || 0) / 1024 / 1024).toFixed(1)} MB), инициируем сохранение...`);
+      params.setPhase?.("merging");
+      params.setMessage?.("Сохранение файла на диск…");
+
+      const dlRes = await directDownload(resp.objectUrl, path, "uniquify", 3_600_000, params.signal);
+      chrome.runtime.sendMessage({ type: "OFFSCREEN_REVOKE_URL", url: resp.objectUrl }).catch(() => {});
+
+      if (dlRes.error) {
+        return { ok: false, error: dlRes.error, retryable: dlRes.retryable };
+      }
+      return { ok: true, bytes: resp.bytes };
     });
 
     if (offResult && typeof offResult === "object" && "ok" in offResult && offResult.ok) {
@@ -791,7 +814,14 @@ async function downloadMergedHls(
         const r = await sendChunkToOffscreen(jobId, i, totalChunks, new Uint8Array(chunkBuf));
         if (!r.ok) return { ok: false, error: r.error };
       }
-      return commitOffscreen(jobId, path, blob.type);
+      const commitRes = await commitOffscreen(jobId, path, blob.type);
+      if (!commitRes.ok || !commitRes.objectUrl) {
+        return { ok: false, error: commitRes.error || "сохранение не завершено" };
+      }
+      const dlRes = await directDownload(commitRes.objectUrl, path, "uniquify", 1_800_000, params.signal);
+      chrome.runtime.sendMessage({ type: "OFFSCREEN_REVOKE_URL", url: commitRes.objectUrl }).catch(() => {});
+      if (dlRes.error) return { ok: false, error: dlRes.error };
+      return { ok: true };
     });
 
     if (chunkOk && typeof chunkOk === "object" && "ok" in chunkOk && chunkOk.ok) {

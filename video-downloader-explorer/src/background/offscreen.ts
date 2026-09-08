@@ -15,7 +15,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
   if (!msg) return;
 
   if (msg.type === "OFFSCREEN_DOWNLOAD_HLS") {
-    const { segments, baseUrl, filename, mime } = msg as {
+    const { segments, baseUrl, mime } = msg as {
       segments: HlsSegmentInfo[];
       baseUrl: string;
       filename: string;
@@ -34,32 +34,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
     )
       .then((blob) => {
         const objectUrl = URL.createObjectURL(blob);
-        chrome.downloads.download(
-          { url: objectUrl, filename: filename || "videos/stream.mp4", conflictAction: "uniquify", saveAs: false },
-          (id) => {
-            if (chrome.runtime.lastError) {
-              URL.revokeObjectURL(objectUrl);
-              sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-              return;
-            }
-            let done = false;
-            const finish = (res: { ok: boolean; error?: string; bytes?: number }) => {
-              if (done) return;
-              done = true;
-              try { chrome.downloads.onChanged.removeListener(listener); } catch { /* */ }
-              setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-              sendResponse(res);
-            };
-            const listener = (delta: chrome.downloads.DownloadDelta) => {
-              if (delta.id !== id) return;
-              if (delta.state?.current === "complete") finish({ ok: true, bytes: blob.size });
-              else if (delta.state?.current === "interrupted") {
-                finish({ ok: false, error: delta.error?.current || "interrupted" });
-              }
-            };
-            chrome.downloads.onChanged.addListener(listener);
-          }
-        );
+        sendResponse({ ok: true, objectUrl, bytes: blob.size });
       })
       .catch((e) => {
         sendResponse({ ok: false, error: String((e as Error)?.message || e) });
@@ -104,34 +79,18 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       const blob = new Blob(job.parts as BlobPart[], { type: msg.mime || "application/octet-stream" });
       const objectUrl = URL.createObjectURL(blob);
 
-      chrome.downloads.download(
-        { url: objectUrl, filename: msg.filename || "videos/video.mp4", conflictAction: "uniquify", saveAs: false },
-        (id) => {
-          if (chrome.runtime.lastError) {
-            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-            return;
-          }
-          let done = false;
-          const finish = (res: { ok: boolean; error?: string; bytes?: number }) => {
-            if (done) return;
-            done = true;
-            try { chrome.downloads.onChanged.removeListener(listener); } catch { /* */ }
-            setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-            sendResponse(res);
-          };
-          const listener = (delta: chrome.downloads.DownloadDelta) => {
-            if (delta.id !== id) return;
-            if (delta.state?.current === "complete") finish({ ok: true, bytes: total });
-            else if (delta.state?.current === "interrupted") {
-              finish({ ok: false, error: delta.error?.current || "interrupted" });
-            }
-          };
-          chrome.downloads.onChanged.addListener(listener);
-        }
-      );
+      sendResponse({ ok: true, objectUrl, bytes: blob.size });
     } catch (e) {
       sendResponse({ ok: false, error: String((e as Error)?.message || e) });
     }
+    return true;
+  }
+
+  if (msg.type === "OFFSCREEN_REVOKE_URL") {
+    if (msg.url) {
+      try { URL.revokeObjectURL(msg.url); } catch { /* ignore */ }
+    }
+    sendResponse({ ok: true });
     return true;
   }
 });

@@ -160,16 +160,16 @@ async function main() {
     copyDirWithManifest(dist, unpackedDir, chromeManifest);
     console.log(`📂 Unpacked (Chrome macOS): ${unpackedDir}`);
 
-    // 3) ZIP-архив
+    // 3) Документация (помещаем README.md и в распакованную папку, и в ZIP)
+    generateDocs(outDir);
+    copyFileSync(path.join(outDir, "INSTALL_MACOS.md"), path.join(unpackedDir, "README.md"));
+    console.log(`📄 Инструкция создана: ${path.join(outDir, "INSTALL_MACOS.md")}`);
+
+    // 4) ZIP-архив (включает файлы расширения и README.md)
     const zip = buildZipFromDir(unpackedDir);
     const zipPath = path.join(outDir, "video-downloader-explorer-chrome-macos.zip");
     writeFileSync(zipPath, zip);
     console.log(`📦 ZIP (Chrome macOS): ${zipPath} (${(zip.length / 1024).toFixed(1)} KB)`);
-
-    // 4) Документация
-    generateDocs(outDir);
-    copyFileSync(path.join(outDir, "INSTALL_MACOS.md"), path.join(unpackedDir, "README.md"));
-    console.log(`📄 Инструкция создана: ${path.join(outDir, "INSTALL_MACOS.md")}`);
   }
 
   console.log("");

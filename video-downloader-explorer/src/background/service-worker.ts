@@ -475,33 +475,86 @@ function installWebRequestObserver(): void {
       (details) => {
         try {
           const url = details.url || "";
+
+          // Игнорируем UI-звуки YouTube (поиск голосом, клики, нотификации)
+          if (/youtube\.com\/s\/search\/audio\//i.test(url) ||
+              /failure\.mp3|no_input\.mp3|open\.mp3|success\.mp3/i.test(url) ||
+              /\/ui_sound|\/sound_effects?\//i.test(url)) {
+            return;
+          }
+
           const isMediaReq = details.type === "media";
           const isMediaExt = /\.(mp4|webm|mkv|mov|m4v|ts|m3u8|mpd)(\?|$)/i.test(url);
           const isKnownMediaPattern = /videoplayback|\/hls\/|\/live\/|\/stream\/|\.mmcdn\.com/i.test(url);
           if (!isMediaReq && !isMediaExt && !isKnownMediaPattern) return;
 
+          let cleanUrl = url;
+          let storageKey = url;
+          let itagQuality = "";
+          let isAudioOnly = false;
+
+          // Фильтрация и нормализация googlevideo (YouTube)
+          if (/googlevideo\.com\/videoplayback/i.test(url)) {
+            // Игнорируем превью-раскадровки (storyboard sprites) и чанки-спрайты
+            if (/[?&](sq=|sigh=)/i.test(url) || /[?&]itag=(324|325|326|327|328|329)\b/.test(url)) {
+              return;
+            }
+            try {
+              const u = new URL(url);
+              u.searchParams.delete("range");
+              u.searchParams.delete("rn");
+              u.searchParams.delete("rbuf");
+              cleanUrl = u.toString();
+              const vidId = u.searchParams.get("id") || "";
+              const itagStr = u.searchParams.get("itag") || "";
+              const itag = parseInt(itagStr, 10);
+              storageKey = `yt-${vidId}-${itagStr || "0"}`;
+              if (itag) {
+                if (itag === 18) itagQuality = "360p";
+                else if (itag === 22) itagQuality = "720p";
+                else if (itag === 137 || itag === 248 || itag === 399) itagQuality = "1080p";
+                else if (itag === 136 || itag === 247 || itag === 398) itagQuality = "720p";
+                else if (itag === 135 || itag === 244 || itag === 397) itagQuality = "480p";
+                else if (itag === 134 || itag === 243 || itag === 396) itagQuality = "360p";
+                else if (itag === 133 || itag === 242 || itag === 395) itagQuality = "240p";
+                else if (itag === 140) { itagQuality = "M4A 128k"; isAudioOnly = true; }
+                else if (itag === 251) { itagQuality = "Opus 160k"; isAudioOnly = true; }
+                else if (itag === 250) { itagQuality = "Opus 70k"; isAudioOnly = true; }
+                else if (itag === 249) { itagQuality = "Opus 50k"; isAudioOnly = true; }
+                else if (itag >= 256 && itag <= 272) itagQuality = "1440p+";
+              }
+            } catch { /* ignore */ }
+          }
+
           // Регистрируем кандидата в сетевой буфер вкладки
           const isHls = /\.m3u8(\?|$)/i.test(url) || /\/hls\//i.test(url);
           const isDash = /\.mpd(\?|$)/i.test(url) || /\/dash\//i.test(url);
-          const isWebm = /\.webm(\?|$)/i.test(url);
+          const isWebm = /\.webm(\?|$)/i.test(url) || isAudioOnly && cleanUrl.includes("mime=audio%2Fwebm");
           const container = isHls ? "hls" : isDash ? "dash" : (isWebm ? "webm" : "mp4");
+
+          const c = details.tabId > 0 ? crawlers.get(details.tabId) : undefined;
+          const pageTitle = (c?.rootTitle || "").replace(/\s*-\s*YouTube$/i, "").trim();
+          const title = pageTitle
+            ? `${pageTitle} · [${itagQuality || (isAudioOnly ? "Аудио" : "Поток")}]`
+            : (itagQuality ? `YouTube · [${itagQuality}]` : undefined);
+
           const cand: import("../shared/types").RawVideoCandidate = {
-            videoUrl: url,
+            videoUrl: cleanUrl,
             sourceType: "webrequest",
             container,
             isManifest: isHls || isDash,
             mimeType: isHls ? "application/x-mpegurl" : isDash ? "application/dash+xml" : (isWebm ? "video/webm" : "video/mp4"),
-            context: { via: "webrequest", type: details.type },
+            title,
+            context: { via: "webrequest", type: details.type, itagQuality, isAudioOnly },
           };
 
           if (details.tabId > 0) {
             let m = tabMediaRequests.get(details.tabId);
             if (!m) { m = new Map(); tabMediaRequests.set(details.tabId, m); }
-            m.set(url, cand);
+            m.set(storageKey, cand);
 
-            const c = crawlers.get(details.tabId);
             if (c) {
-              c.addCandidates([cand], c.rootUrl || url, c.rootTitle);
+              c.addCandidates([cand], c.rootUrl || cleanUrl, c.rootTitle);
             }
           }
 

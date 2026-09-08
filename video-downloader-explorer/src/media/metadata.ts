@@ -280,6 +280,13 @@ export async function resolveVideoMetadata(
     }
   }
 
+  // Защитный фильтр длительности: если значение нереалистично велико (> 48 часов)
+  // или отрицательно / NaN — это некорректный unscaled timescale, сбрасываем.
+  if (durationSec !== undefined && (durationSec <= 0 || durationSec > 86400 * 2 || isNaN(durationSec))) {
+    metadataLog.debug(`Meta: отброшена нереалистичная длительность ${durationSec}s`);
+    durationSec = undefined;
+  }
+
   const ext = mimeToExt(detectedMime) || extensionFromUrl(url);
   const bitrateKbps = fileSize && durationSec ? Math.round((fileSize * 8) / (durationSec * 1000)) : undefined;
 
@@ -314,16 +321,38 @@ function parseMp4Boxes(bytes: Uint8Array): Mp4Info | null {
   const info: Mp4Info = {};
   walkBoxes(bytes, 0, bytes.length, (type, payload, end) => {
     if (type === "moov") {
+      let movieTimescale = 1000;
       walkBoxes(payload, 0, payload.length, (t2, p2) => {
-        if (t2 === "trak") {
+        if (t2 === "mvhd") {
+          const v = readVersioned(p2);
+          if (v.version === 1 && v.payload.length >= 28) {
+            const ts = readU32(v.payload, 16);
+            const d = readU64(v.payload, 20);
+            if (ts > 0) {
+              movieTimescale = ts;
+              if (d > 0) {
+                const s = d / ts;
+                if (s > 0 && s < 86400 * 2) info.durationSec = s;
+              }
+            }
+          } else if (v.version === 0 && v.payload.length >= 16) {
+            const ts = readU32(v.payload, 8);
+            const d = readU32(v.payload, 12);
+            if (ts > 0) {
+              movieTimescale = ts;
+              if (d > 0) {
+                const s = d / ts;
+                if (s > 0 && s < 86400 * 2) info.durationSec = s;
+              }
+            }
+          }
+        } else if (t2 === "trak") {
           let trackW: number | undefined, trackH: number | undefined, dur: number | undefined, codec: string | undefined;
           walkBoxes(p2, 0, p2.length, (t3, p3) => {
             if (t3 === "tkhd") {
               const v = readVersioned(p3);
               if (v.version === 1 && 32 + 8 <= p3.length) {
                 dur = readU64(p3, 20 + 4);
-                // tkhd v1: 32+8+8+4+4+8+8+2+2+2+2+36+4+8+4+4+4+4 (varies)
-                // Безопаснее: читаем по fixed offset.
               } else if (v.version === 0 && 20 + 4 <= p3.length) {
                 dur = readU32(p3, 20);
               }
@@ -370,6 +399,9 @@ function parseMp4Boxes(bytes: Uint8Array): Mp4Info | null {
             if (!info.width || trackW > info.width) info.width = trackW;
             if (!info.height || trackH > info.height) info.height = trackH;
           }
+          if (dur && (!info.durationSec || dur > info.durationSec) && dur < 86400 * 2) {
+            info.durationSec = dur;
+          }
           if (codec) {
             if (/^(avc1|hvc1|hev1|vp09|av01)/.test(codec) && !info.codecVideo) info.codecVideo = codec;
             else if (/^(mp4a|opus|ac-3|ec-3)/.test(codec) && !info.codecAudio) info.codecAudio = codec;
@@ -378,8 +410,7 @@ function parseMp4Boxes(bytes: Uint8Array): Mp4Info | null {
       });
     }
   });
-  if (!info.width || !info.height) return null;
-  if (info.durationSec && !info.durationSec) info.durationSec = 0;
+  if (!info.width && !info.height && !info.codecAudio && !info.durationSec) return null;
   return info;
 }
 

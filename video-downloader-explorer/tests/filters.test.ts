@@ -44,6 +44,16 @@ describe("matchesFilters", () => {
   it("excludeContainers", () => {
     expect(matchesFilters(cand({ container: "mp4" }), { ...DEFAULTS, excludeContainers: ["mp4"] })).toBe(false);
   });
+  it("отсеивает мёртвые стабы (unknown container, 0 байт)", () => {
+    expect(matchesFilters(cand({ container: "unknown", fileSize: 0, isManifest: false, isBlob: false, isLive: false }), { ...DEFAULTS })).toBe(false);
+    expect(matchesFilters(cand({ container: "unknown", fileSize: undefined, isManifest: false, isBlob: false, isLive: false }), { ...DEFAULTS })).toBe(false);
+    // Но если live или manifest — пропускает
+    expect(matchesFilters(cand({ container: "unknown", isLive: true }), { ...DEFAULTS })).toBe(true);
+  });
+  it("отсеивает UI звуки поиска YouTube", () => {
+    expect(matchesFilters(cand({ videoUrl: "https://www.youtube.com/s/search/audio/failure.mp3" }), { ...DEFAULTS })).toBe(false);
+    expect(matchesFilters(cand({ videoUrl: "https://example.com/sound/open.mp3" }), { ...DEFAULTS })).toBe(false);
+  });
 });
 
 describe("countMatched", () => {

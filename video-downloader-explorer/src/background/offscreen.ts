@@ -15,9 +15,11 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
   if (!msg) return;
 
   if (msg.type === "OFFSCREEN_DOWNLOAD_HLS") {
-    const { segments, baseUrl, mime } = msg as {
+    const { segments, baseUrl, audioSegments, audioBaseUrl } = msg as {
       segments: HlsSegmentInfo[];
+      audioSegments?: HlsSegmentInfo[];
       baseUrl: string;
+      audioBaseUrl?: string;
       filename: string;
       mime: string;
     };
@@ -30,7 +32,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         chrome.runtime.sendMessage({ type: "OFFSCREEN_HLS_PROGRESS", received, total }).catch(() => {});
       },
       undefined,
-      5
+      5,
+      audioSegments,
+      audioBaseUrl
     )
       .then((blob) => {
         const objectUrl = URL.createObjectURL(blob);

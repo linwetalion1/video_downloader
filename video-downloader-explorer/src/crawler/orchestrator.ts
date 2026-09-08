@@ -475,6 +475,32 @@ export class Crawler {
       referer: c.sourcePageUrl,
     });
     Object.assign(c, filterMeta(meta));
+
+    // Проверяем на мёртвый стаб (0 байт, неизвестный контейнер, не манифест, не blob, не live)
+    if (c.container === "unknown" && (!c.fileSize || c.fileSize === 0) && !c.isManifest && !c.isBlob && !c.isLive) {
+      c.status = "failed";
+      c.phase = "done";
+      c.message = "Файл недоступен (0 байт или 403 Forbidden)";
+      this.stats.totalSkipped++;
+      this.emitCandidateUpdate(c.id, this.candidatePatch(c));
+      this.deps.onEvent({ type: "log", entry: scanLog.debug(`SKIP ${c.videoUrl.slice(0, 60)}: 0 bytes / unknown container`) });
+      return;
+    }
+
+    // Человекочитаемое название для обычных видео (если скрыто или raw URL)
+    if (!c.title || isObscureTitle(c.title)) {
+      const baseTitle = c.sourcePageTitle && !isObscureTitle(c.sourcePageTitle)
+        ? c.sourcePageTitle.replace(/\s*-\s*YouTube$/i, "").trim()
+        : "";
+      const res = c.height ? `${c.height}p` : c.container.toUpperCase();
+      const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
+      if (baseTitle) {
+        c.title = `${baseTitle} · [${res}${durStr ? `, ${durStr}` : ""}]`;
+      } else if (c.durationSec && c.durationSec > 0) {
+        c.title = `Видео (${durStr}, ${res})`;
+      }
+    }
+
     c.status = "ready";
     c.phase = "done";
     c.message = c.message || `Метаданные получены: ${c.container}, ${c.width || "?"}×${c.height || "?"}`;
@@ -525,14 +551,17 @@ export class Crawler {
           if (!c.title || isObscureTitle(c.title)) {
             const res = best.resolutionLabel || (c.height ? `${c.height}p` : "");
             const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
+            const baseTitle = c.sourcePageTitle && !isObscureTitle(c.sourcePageTitle)
+              ? c.sourcePageTitle.replace(/\s*-\s*YouTube$/i, "").trim()
+              : "";
             if (c.isLive) {
-              c.title = `🔴 Прямой эфир ${res}`.trim();
+              c.title = baseTitle ? `${baseTitle} · 🔴 Прямой эфир (${res})` : `🔴 Прямой эфир ${res}`.trim();
             } else if (c.durationSec && c.durationSec >= 3600) {
-              c.title = `📼 Трансляция / Запись (${durStr}, ${res})`.trim();
+              c.title = baseTitle ? `${baseTitle} · 📼 Запись (${durStr}, ${res})` : `📼 Трансляция / Запись (${durStr}, ${res})`.trim();
             } else if (c.durationSec && c.durationSec > 0) {
-              c.title = `Видео (${durStr}, ${res})`.trim();
+              c.title = baseTitle ? `${baseTitle} · [${res || "HLS"}]` : `Видео (${durStr}, ${res})`.trim();
             } else {
-              c.title = `Поток HLS (${res})`.trim();
+              c.title = baseTitle ? `${baseTitle} · Поток HLS (${res})` : `Поток HLS (${res})`.trim();
             }
           }
 
@@ -545,7 +574,14 @@ export class Crawler {
           c.isLive = !r.isVOD;
           if (!c.title || isObscureTitle(c.title)) {
             const durStr = c.durationSec ? formatDurationHuman(c.durationSec) : "";
-            c.title = c.isLive ? "🔴 Прямой эфир (HLS)" : (c.durationSec && c.durationSec >= 3600 ? `📼 Трансляция (${durStr})` : `Видео HLS (${durStr})`);
+            const baseTitle = c.sourcePageTitle && !isObscureTitle(c.sourcePageTitle)
+              ? c.sourcePageTitle.replace(/\s*-\s*YouTube$/i, "").trim()
+              : "";
+            c.title = c.isLive
+              ? (baseTitle ? `${baseTitle} · 🔴 Прямой эфир (HLS)` : "🔴 Прямой эфир (HLS)")
+              : (c.durationSec && c.durationSec >= 3600
+                  ? (baseTitle ? `${baseTitle} · 📼 Запись (${durStr})` : `📼 Трансляция (${durStr})`)
+                  : (baseTitle ? `${baseTitle} · Видео (${durStr})` : `Видео HLS (${durStr})`));
           }
         }
       } else if (c.container === "dash") {

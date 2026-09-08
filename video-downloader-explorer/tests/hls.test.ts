@@ -1,6 +1,6 @@
 // Тесты HLS-парсера.
 import { describe, it, expect } from "vitest";
-import { parseHls } from "../src/media/hls";
+import { parseHls, rewriteAudioFragmentTrackId } from "../src/media/hls";
 
 describe("parseHls master", () => {
   it("извлекает варианты", () => {
@@ -19,6 +19,23 @@ describe("parseHls master", () => {
     expect(r.variants).toHaveLength(3);
     expect(r.variants[0].height).toBe(1080);
     expect(r.variants[2].height).toBe(360);
+  });
+
+  it("связывает audioUrl из EXT-X-MEDIA:TYPE=AUDIO с видео-вариантами (YouTube demuxed HLS)", () => {
+    const text = [
+      "#EXTM3U",
+      "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-group\",NAME=\"English\",DEFAULT=YES,URI=\"audio_128k.m3u8\"",
+      "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,AUDIO=\"audio-group\"",
+      "video_1080p.m3u8",
+      "#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720,AUDIO=\"audio-group\"",
+      "video_720p.m3u8",
+    ].join("\n");
+    const r = parseHls(text, "https://googlevideo.com/manifest/hls_variant/master.m3u8");
+    expect(r.ok).toBe(true);
+    expect(r.isMaster).toBe(true);
+    expect(r.variants).toHaveLength(2);
+    expect(r.variants[0].audioUrl).toBe("https://googlevideo.com/manifest/hls_variant/audio_128k.m3u8");
+    expect(r.variants[1].audioUrl).toBe("https://googlevideo.com/manifest/hls_variant/audio_128k.m3u8");
   });
 });
 
@@ -119,5 +136,28 @@ describe("parseHls media", () => {
     const r = parseHls(text, "https://x.com/master.m3u8");
     expect(r.isEncrypted).toBe(true);
     expect(r.isDRM).toBe(false);
+  });
+});
+
+describe("fMP4 audio track rewrite", () => {
+  it("перезаписывает track_ID на 2 в tfhd аудио-фрагмента", () => {
+    const tfhd = new Uint8Array([
+      0, 0, 0, 16, // size
+      116, 102, 104, 100, // "tfhd"
+      0, 0, 0, 0, // version/flags
+      0, 0, 0, 1, // track_id = 1
+    ]);
+    const traf = new Uint8Array(8 + tfhd.length);
+    traf.set([0, 0, 0, traf.length, 116, 114, 97, 102], 0); // "traf"
+    traf.set(tfhd, 8);
+
+    const moof = new Uint8Array(8 + traf.length);
+    moof.set([0, 0, 0, moof.length, 109, 111, 111, 102], 0); // "moof"
+    moof.set(traf, 8);
+
+    rewriteAudioFragmentTrackId(moof);
+
+    const view = new DataView(moof.buffer, moof.byteOffset, moof.byteLength);
+    expect(view.getUint32(28)).toBe(2);
   });
 });

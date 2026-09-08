@@ -64,6 +64,7 @@ function buildConditions(f: Filters): Condition[] {
 function looksLikeAd(c: VideoCandidate): boolean {
   const url = c.videoUrl.toLowerCase();
   if (/ads?\.|doubleclick|googlesyndication|adservice|adnxs|adsrv|tribalfusion|outbrain/i.test(url)) return true;
+  if (/youtube\.com\/s\/search\/audio\//i.test(url) || /failure\.mp3|no_input\.mp3|open\.mp3|success\.mp3/i.test(url)) return true;
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
     if (KNOWN_DOMAINS_HEAVY_DRM.has(host)) return true;
@@ -72,6 +73,15 @@ function looksLikeAd(c: VideoCandidate): boolean {
 }
 
 export function matchesFilters(c: VideoCandidate, f: Filters): boolean {
+  // Отсеиваем мёртвые кандидаты (пустые 0-байтные заглушки и 403-ошибки без формата)
+  if (c.container === "unknown" && (!c.fileSize || c.fileSize === 0) && !c.isManifest && !c.isBlob && !c.isLive) {
+    return false;
+  }
+  // Отсеиваем UI звуковые эффекты
+  if (/youtube\.com\/s\/search\/audio\//i.test(c.videoUrl) || /failure\.mp3|no_input\.mp3|open\.mp3|success\.mp3/i.test(c.videoUrl)) {
+    return false;
+  }
+
   const conds = buildConditions(f);
   if (conds.length === 0) return true;
   if (f.filterMode === "AND") return conds.every((cond) => cond.known(c) && cond.passes(c));

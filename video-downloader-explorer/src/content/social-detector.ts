@@ -122,15 +122,42 @@ function detectYouTube(w: any, pageUrl: string, doc: Document): RawVideoCandidat
       const isPremiumDRM = !!(sd?.drmParams || sd?.serverAbrStreamingUrl?.includes("drm"));
 
       if (sd) {
-        // signatureCipher/cipher — ссылки, требующие подписи (YouTube часто прячет url).
+        const hasHls = !!sd.hlsManifestUrl;
+
+        // 1) Приоритет №1: HLS-манифест YouTube (содержит видео всех качеств + аудио, не требует cipher-подписи)
+        if (sd.hlsManifestUrl && !seen.has(sd.hlsManifestUrl)) {
+          seen.add(sd.hlsManifestUrl);
+          out.push({
+            videoUrl: sd.hlsManifestUrl, sourceType: "youtube",
+            container: "hls", mimeType: "application/x-mpegurl", isManifest: true,
+            title: title || undefined, thumbnailUrl: thumb, durationSec: durSec,
+            context: { isMasterHls: true },
+          });
+        }
+
+        // 2) DASH-манифест
+        if (sd.dashManifestUrl && !seen.has(sd.dashManifestUrl)) {
+          seen.add(sd.dashManifestUrl);
+          out.push({
+            videoUrl: sd.dashManifestUrl, sourceType: "youtube",
+            container: "dash", mimeType: "application/dash+xml", isManifest: true,
+            title: title ? `${title} · DASH` : undefined, thumbnailUrl: thumb, durationSec: durSec,
+          });
+        }
+
+        // 3) Прямые форматы (progressive / adaptive).
+        // Если HLS-манифест уже найден — скрываем битые signatureCipher ссылки (они гарантированно
+        // выдают 403 и пропускаются), оставляя только рабочие прямые URL (f.url).
         const formats = [...(sd.formats || []), ...(sd.adaptiveFormats || [])];
         for (const f of formats) {
           const url = f?.url || (f?.signatureCipher && /url=([^&]+)/.exec(f.signatureCipher)?.[1]) || (f?.cipher && /url=([^&]+)/.exec(f.cipher)?.[1]);
           if (url && !seen.has(url)) {
             const decoded = (() => { try { return decodeURIComponent(url as string); } catch { return url as string; } })();
-            seen.add(decoded);
-            // Если URL пришёл из signatureCipher/cipher (а не готовым в f.url) — нужна подпись.
             const needsSig = !f?.url;
+            // Если есть HLS, отбрасываем неподписанные cipher-ссылки чтобы не спамить UI десятками нерабочих карточек
+            if (hasHls && needsSig) continue;
+
+            seen.add(decoded);
             const itag = parseInt(f.itag || "0", 10);
             let quality = "";
             if (itag >= 137 || itag === 308) quality = "1080p";
@@ -145,35 +172,18 @@ function detectYouTube(w: any, pageUrl: string, doc: Document): RawVideoCandidat
               mimeType: f.mimeType?.split(";")[0] || "video/mp4",
               width: f.width, height: f.height,
               bitrateKbps: f.bitrate ? Math.round(f.bitrate / 1000) : undefined,
-              // Качество не примешиваем к title (его видно в метаданных и шаблоне имени).
               title: title || undefined,
               thumbnailUrl: thumb, durationSec: durSec,
               context: { needsSignature: needsSig, itag, quality },
             });
           }
         }
+
         if (isPremiumDRM) {
           out.push({
             videoUrl: pageUrl, sourceType: "youtube",
             container: "unknown", isDRM: true, isManifest: false,
             title: (title ? title + " " : "") + "(DRM/Премиум)",
-          });
-        }
-        // Если есть HLS-манифест — добавить его.
-        if (sd.hlsManifestUrl && !seen.has(sd.hlsManifestUrl)) {
-          seen.add(sd.hlsManifestUrl);
-          out.push({
-            videoUrl: sd.hlsManifestUrl, sourceType: "youtube",
-            container: "hls", mimeType: "application/x-mpegurl", isManifest: true,
-            title: title ? title + " · HLS" : undefined, thumbnailUrl: thumb, durationSec: durSec,
-          });
-        }
-        if (sd.dashManifestUrl && !seen.has(sd.dashManifestUrl)) {
-          seen.add(sd.dashManifestUrl);
-          out.push({
-            videoUrl: sd.dashManifestUrl, sourceType: "youtube",
-            container: "dash", mimeType: "application/dash+xml", isManifest: true,
-            title: title ? title + " · DASH" : undefined, thumbnailUrl: thumb, durationSec: durSec,
           });
         }
       }

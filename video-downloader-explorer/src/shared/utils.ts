@@ -267,6 +267,8 @@ export function isObscureTitle(title?: string | null): boolean {
   if (!title) return true;
   const t = title.trim().toLowerCase();
   if (t === "video" || t === "video.m3u8" || t === "master.m3u8" || t === "index.m3u8" || t === "playlist.m3u8") return true;
+  if (t === "videoplayback" || t.startsWith("videoplayback")) return true;
+  if (t.startsWith("http://") || t.startsWith("https://")) return true;
   if (t === "стена | вконтакте" || t === "вконтакте" || t === "vk" || t === "видеозаписи" || t === "стена") return true;
   if (/^dash_[\d_.]+\.mpd$/i.test(t) || /^hls_[\d_.]+\.m3u8$/i.test(t)) return true;
   if (/^expires\/\d+/i.test(t)) return true;

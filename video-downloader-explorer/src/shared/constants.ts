@@ -98,10 +98,11 @@ export const TRACKING_PARAMS = new Set([
  *  (подписи, expiry, IP-binding). Вырезаются при группировке вариантов,
  *  но значимые для качества параметры (itag, clen, mime) сохраняются. */
 export const VOLATILE_QUERY_PARAMS = new Set([
-  // googlevideo / общие подписи
+  // googlevideo / общие подписи и чанки
   "expires", "expire", "sig", "signature", "lsig", "sparams",
   "ip", "ipbits", "cp", "c", "eit", "ei", "oi", "pl", "gir",
   "ratebypass", "keepalive", "lmt", "mt", "mv", "ms", "source",
+  "range", "rn", "rbuf", "sq",
   // Instagram / Meta CDN
   "efg", "_nc_ohc", "_nc_ht", "_nc_sid", "_nc_cat", "_nc_log", "_nc_rid",
   "oh", "oe", "se", "ccb", "ig_cache_key", "dl", "nc_ht",

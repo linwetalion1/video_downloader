@@ -711,7 +711,16 @@ async function downloadHls(candidate: VideoCandidate, params: DownloadParams): P
     if (!sub.ok || !sub.segments || sub.segments.length === 0) {
       return { ok: false, error: `HLS media: ${sub.error || "нет сегментов"}`, errorCode: "HLS_MEDIA", retryable: false };
     }
-    return downloadMergedHls(candidate, sub.segments, params, best.resolutionLabel);
+    let audioSegments: NonNullable<Awaited<ReturnType<typeof fetchAndParseHls>>["segments"]> | undefined;
+    if (best.audioUrl) {
+      manifestLog.info(`HLS master: загружаем аудио-плейлист ${best.audioUrl}`);
+      const audioSub = await fetchAndParseHls(best.audioUrl);
+      if (audioSub.ok && audioSub.segments && audioSub.segments.length > 0) {
+        audioSegments = audioSub.segments;
+        manifestLog.info(`HLS master: получено ${audioSegments.length} аудио-сегментов`);
+      }
+    }
+    return downloadMergedHls(candidate, sub.segments, params, best.resolutionLabel, audioSegments, best.url, best.audioUrl);
   }
   if (!parsed.segments || parsed.segments.length === 0) {
     return { ok: false, error: "HLS media: нет сегментов", errorCode: "HLS_NO_SEG", retryable: false };
@@ -723,7 +732,10 @@ async function downloadMergedHls(
   candidate: VideoCandidate,
   segments: NonNullable<Awaited<ReturnType<typeof fetchAndParseHls>>["segments"]>,
   params: DownloadParams,
-  quality: string
+  quality: string,
+  audioSegments?: NonNullable<Awaited<ReturnType<typeof fetchAndParseHls>>["segments"]>,
+  videoBaseUrl?: string,
+  audioBaseUrl?: string
 ): Promise<DownloadResult> {
   const isFmp4 = segments.some((s) => s.isInit);
   const ext = isFmp4 ? "mp4" : "ts";
@@ -731,8 +743,9 @@ async function downloadMergedHls(
   const path = `${buildPath(candidate, params.options)}/${filename}`;
   const mime = isFmp4 ? "video/mp4" : "video/mp2t";
 
+  const totalSegs = segments.length + (audioSegments?.length || 0);
   params.setPhase?.("downloading");
-  params.setMessage?.(`Скачиваем ${segments.length} сегментов HLS…`);
+  params.setMessage?.(audioSegments ? `Скачиваем HLS видео (${segments.length}) + аудио (${audioSegments.length})…` : `Скачиваем ${segments.length} сегментов HLS…`);
 
   // Путь 1: Загрузка прямо в offscreen document (без передачи гигабайтов через IPC)
   const progressListener = (msg: any) => {
@@ -748,7 +761,9 @@ async function downloadMergedHls(
       const resp = (await chrome.runtime.sendMessage({
         type: "OFFSCREEN_DOWNLOAD_HLS",
         segments,
-        baseUrl: candidate.videoUrl,
+        audioSegments,
+        baseUrl: videoBaseUrl || candidate.videoUrl,
+        audioBaseUrl,
         filename: path,
         mime,
       })) as { ok: boolean; objectUrl?: string; error?: string; bytes?: number };

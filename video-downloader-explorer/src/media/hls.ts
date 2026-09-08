@@ -95,6 +95,29 @@ function parseMaster(lines: string[], baseUrl: string): HlsParseResult {
   let isDRM = false;
   let isEncrypted = false;
 
+  // 1) Предварительный сбор всех аудио-дорожек: groupId -> audioUrl
+  const audioTracksByGroup = new Map<string, string>();
+  let defaultAudioUrl: string | undefined;
+
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-MEDIA") && /TYPE=AUDIO/i.test(line)) {
+      const attrs = parseAttrList(line.slice("#EXT-X-MEDIA:".length));
+      const uri = attrs["URI"];
+      const groupId = attrs["GROUP-ID"] || "";
+      if (uri) {
+        const abs = normalizeUrl(uri, baseUrl);
+        if (abs) {
+          if (groupId && !audioTracksByGroup.has(groupId)) {
+            audioTracksByGroup.set(groupId, abs);
+          }
+          if (attrs["DEFAULT"]?.toUpperCase() === "YES" || !defaultAudioUrl) {
+            defaultAudioUrl = abs;
+          }
+        }
+      }
+    }
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // Шифрование уровня master — только через EXT-X-SESSION-KEY
@@ -120,9 +143,12 @@ function parseMaster(lines: string[], baseUrl: string): HlsParseResult {
     const w = parseInt(attrs["RESOLUTION"]?.split("x")[0] || "0", 10) || undefined;
     const h = parseInt(attrs["RESOLUTION"]?.split("x")[1] || "0", 10) || undefined;
     const fr = parseFloat(attrs["FRAME-RATE"] || "") || undefined;
+    const audioGroup = attrs["AUDIO"];
+    const audioUrl = (audioGroup ? audioTracksByGroup.get(audioGroup) : undefined) || defaultAudioUrl;
     variants.push({
       id: uid("v"),
       url: abs,
+      audioUrl,
       bandwidth: bw,
       width: w,
       height: h,
@@ -339,43 +365,228 @@ async function aesCbcDecryptNoPad(rawKey: ArrayBuffer, iv: Uint8Array, data: Uin
   padded.set(data.subarray(0, data.length));
   padded.set(data.subarray(data.length - 16), data.length);
   const buf = await cryptoObj.subtle.decrypt({ name: "AES-CBC", iv: iv as unknown as BufferSource }, key, padded);
-  return new Uint8Array(buf.slice(0, data.length));
+  return new Uint8Array(buf.slice(0, data.length) as ArrayBuffer);
 }
 
-/** Скачивает все сегменты в один файл. Init-сегменты включаются первыми байтами,
- *  AES-128 расшифровывается, byteRange уходит в Range-заголовок.
- *  Поддерживает параллельную загрузку с сохранением порядка сегментов
- *  и потоковую группировку в Blob во избежание V8 heap OOM на файлах 10+ ГБ. */
+// ─── Мультиплексирование fMP4 (объединение аудио и видео в один MP4) ───────
+
+interface BoxHeader {
+  start: number;
+  end: number;
+  size: number;
+  type: string;
+  headerLen: number;
+  payloadStart: number;
+  payloadEnd: number;
+}
+
+function parseBoxHeader(buf: Uint8Array, off: number, maxEnd: number): BoxHeader | null {
+  if (off + 8 > maxEnd) return null;
+  const size32 = ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
+  const type = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+  let size = size32;
+  let headerLen = 8;
+  if (size32 === 1 && off + 16 <= maxEnd) {
+    const hi = ((buf[off + 8] << 24) | (buf[off + 9] << 16) | (buf[off + 10] << 8) | buf[off + 11]) >>> 0;
+    const lo = ((buf[off + 12] << 24) | (buf[off + 13] << 16) | (buf[off + 14] << 8) | buf[off + 15]) >>> 0;
+    size = hi * 2 ** 32 + lo;
+    headerLen = 16;
+  } else if (size32 === 0) {
+    size = maxEnd - off;
+  }
+  if (size < headerLen || off + size > maxEnd) return null;
+  return {
+    start: off, end: off + size, size, type, headerLen,
+    payloadStart: off + headerLen, payloadEnd: off + size,
+  };
+}
+
+function findChildBox(buf: Uint8Array, start: number, end: number, fourcc: string): BoxHeader | null {
+  let off = start;
+  while (off < end) {
+    const box = parseBoxHeader(buf, off, end);
+    if (!box) break;
+    if (box.type === fourcc) return box;
+    off = box.end;
+  }
+  return null;
+}
+
+function collectChildBoxes(buf: Uint8Array, start: number, end: number): BoxHeader[] {
+  const list: BoxHeader[] = [];
+  let off = start;
+  while (off < end) {
+    const box = parseBoxHeader(buf, off, end);
+    if (!box) break;
+    list.push(box);
+    off = box.end;
+  }
+  return list;
+}
+
+function writeU32(buf: Uint8Array, off: number, val: number): void {
+  buf[off] = (val >>> 24) & 0xff;
+  buf[off + 1] = (val >>> 16) & 0xff;
+  buf[off + 2] = (val >>> 8) & 0xff;
+  buf[off + 3] = val & 0xff;
+}
+
+function makeBoxHeader(type: string, payloadLen: number): Uint8Array {
+  const h = new Uint8Array(8);
+  writeU32(h, 0, payloadLen + 8);
+  for (let i = 0; i < 4; i++) h[4 + i] = type.charCodeAt(i);
+  return h;
+}
+
+/** Объединяет video init и audio init в единый двухдорожечный fMP4 заголовок (moov). */
+export function mergeFmp4Init(videoInit: Uint8Array, audioInit: Uint8Array): Uint8Array {
+  const vMoov = findChildBox(videoInit, 0, videoInit.length, "moov");
+  const aMoov = findChildBox(audioInit, 0, audioInit.length, "moov");
+  if (!vMoov || !aMoov) return videoInit;
+
+  const vFtyp = findChildBox(videoInit, 0, videoInit.length, "ftyp");
+  const ftypBytes = vFtyp ? videoInit.subarray(vFtyp.start, vFtyp.end) : new Uint8Array(0);
+
+  // 1. В audioInit moov ищем trak
+  const aTrak = findChildBox(audioInit, aMoov.payloadStart, aMoov.payloadEnd, "trak");
+  if (!aTrak) return videoInit;
+
+  // Клонируем audio trak и меняем track_ID на 2
+  const audioTrakBytes = new Uint8Array(audioInit.subarray(aTrak.start, aTrak.end));
+  const aTkhd = findChildBox(audioTrakBytes, 8, audioTrakBytes.length, "tkhd");
+  if (aTkhd) {
+    const version = audioTrakBytes[aTkhd.payloadStart] ?? 0;
+    const trackIdOff = version === 1 ? aTkhd.payloadStart + 20 : aTkhd.payloadStart + 12;
+    if (trackIdOff + 4 <= aTkhd.payloadEnd) {
+      writeU32(audioTrakBytes, trackIdOff, 2);
+    }
+  }
+
+  // 2. В audioInit moov -> mvex ищем trex
+  let audioTrexBytes: Uint8Array | null = null;
+  const aMvex = findChildBox(audioInit, aMoov.payloadStart, aMoov.payloadEnd, "mvex");
+  if (aMvex) {
+    const aTrex = findChildBox(audioInit, aMvex.payloadStart, aMvex.payloadEnd, "trex");
+    if (aTrex) {
+      audioTrexBytes = new Uint8Array(audioInit.subarray(aTrex.start, aTrex.end));
+      writeU32(audioTrexBytes, aTrex.payloadStart - aTrex.start + 4, 2);
+    }
+  }
+
+  // 3. Разбираем videoInit moov
+  const vMoovChildren = collectChildBoxes(videoInit, vMoov.payloadStart, vMoov.payloadEnd);
+  const newMoovParts: Uint8Array[] = [];
+
+  for (const child of vMoovChildren) {
+    if (child.type === "mvex") {
+      newMoovParts.push(audioTrakBytes);
+      const vMvexPayload = videoInit.subarray(child.payloadStart, child.payloadEnd);
+      const extraLen = audioTrexBytes ? audioTrexBytes.length : 0;
+      const newMvexHeader = makeBoxHeader("mvex", vMvexPayload.length + extraLen);
+      newMoovParts.push(newMvexHeader);
+      newMoovParts.push(vMvexPayload);
+      if (audioTrexBytes) newMoovParts.push(audioTrexBytes);
+    } else {
+      newMoovParts.push(videoInit.subarray(child.start, child.end));
+    }
+  }
+
+  if (!vMoovChildren.some((c) => c.type === "mvex")) {
+    newMoovParts.push(audioTrakBytes);
+  }
+
+  let newMoovPayloadLen = 0;
+  for (const p of newMoovParts) newMoovPayloadLen += p.length;
+  const newMoovHeader = makeBoxHeader("moov", newMoovPayloadLen);
+
+  const merged = new Uint8Array(ftypBytes.length + 8 + newMoovPayloadLen);
+  merged.set(ftypBytes, 0);
+  merged.set(newMoovHeader, ftypBytes.length);
+  let cur = ftypBytes.length + 8;
+  for (const p of newMoovParts) {
+    merged.set(p, cur);
+    cur += p.length;
+  }
+  return merged;
+}
+
+/** Перезаписывает track_ID на 2 в moof -> traf -> tfhd медиа-сегмента аудио. */
+export function rewriteAudioFragmentTrackId(segBytes: Uint8Array): Uint8Array {
+  const moof = findChildBox(segBytes, 0, segBytes.length, "moof");
+  if (!moof) return segBytes;
+  const traf = findChildBox(segBytes, moof.payloadStart, moof.payloadEnd, "traf");
+  if (!traf) return segBytes;
+  const tfhd = findChildBox(segBytes, traf.payloadStart, traf.payloadEnd, "tfhd");
+  if (!tfhd) return segBytes;
+
+  const trackIdOff = tfhd.payloadStart + 4;
+  if (trackIdOff + 4 <= tfhd.payloadEnd) {
+    writeU32(segBytes, trackIdOff, 2);
+  }
+  return segBytes;
+}
+
+/** Скачивает все сегменты в один файл. Поддерживает раздельные видео и аудио потоки (YouTube/demuxed HLS),
+ *  расшифровку AES-128, параллельную загрузку и объединение в монолитный MP4 со звуком. */
 export async function downloadHlsSegments(
   segments: HlsSegmentInfo[],
   baseUrl: string,
   fetcher: typeof fetch = fetch,
   onProgress?: (received: number, total: number) => void,
   signal?: AbortSignal,
-  concurrency = 5
+  concurrency = 5,
+  audioSegments?: HlsSegmentInfo[],
+  audioBaseUrl?: string
 ): Promise<Blob> {
   const keyCache = new Map<string, ArrayBuffer>();
   const emittedInits = new Set<string>();
   let sawFmp4 = false;
 
-  // Отфильтровываем дублирующиеся init-сегменты
-  const cleanSegments: HlsSegmentInfo[] = [];
+  // 1. Подготовка видео-сегментов
+  let videoInitSeg: HlsSegmentInfo | null = null;
+  const cleanVideoSegments: HlsSegmentInfo[] = [];
   for (const seg of segments) {
     const segUrl = normalizeUrl(seg.url, baseUrl) ?? seg.url;
     if (seg.isInit) {
       sawFmp4 = true;
+      if (!videoInitSeg) videoInitSeg = { ...seg, url: segUrl };
       if (emittedInits.has(segUrl)) continue;
       emittedInits.add(segUrl);
     }
-    cleanSegments.push({ ...seg, url: segUrl });
+    cleanVideoSegments.push({ ...seg, url: segUrl });
   }
 
-  const totalSegments = cleanSegments.length;
+  // 2. Подготовка аудио-сегментов (если есть отдельная аудио-дорожка)
+  let audioInitSeg: HlsSegmentInfo | null = null;
+  const cleanAudioSegments: HlsSegmentInfo[] = [];
+  if (audioSegments && audioSegments.length > 0) {
+    const audioBase = audioBaseUrl || baseUrl;
+    for (const seg of audioSegments) {
+      const segUrl = normalizeUrl(seg.url, audioBase) ?? seg.url;
+      if (seg.isInit) {
+        if (!audioInitSeg) audioInitSeg = { ...seg, url: segUrl };
+      }
+      cleanAudioSegments.push({ ...seg, url: segUrl });
+    }
+  }
+
+  const hasAudioTrack = cleanAudioSegments.length > 0;
+  const allTasks: Array<{ seg: HlsSegmentInfo; isAudio: boolean; orderIdx: number }> = [];
+
+  for (let i = 0; i < cleanVideoSegments.length; i++) {
+    allTasks.push({ seg: cleanVideoSegments[i], isAudio: false, orderIdx: i });
+  }
+  for (let i = 0; i < cleanAudioSegments.length; i++) {
+    allTasks.push({ seg: cleanAudioSegments[i], isAudio: true, orderIdx: i });
+  }
+
+  const totalSegments = allTasks.length;
   if (totalSegments === 0) throw new Error("нет сегментов для скачивания");
 
-  manifestLog.info(`HLS download: ${totalSegments} сегментов, concurrency=${concurrency}`);
+  manifestLog.info(`HLS download: ${cleanVideoSegments.length} видео + ${cleanAudioSegments.length} аудио сегментов, concurrency=${concurrency}`);
 
-  const results: (Uint8Array | null)[] = new Array(totalSegments).fill(null);
+  const videoResults: (Uint8Array | null)[] = new Array(cleanVideoSegments.length).fill(null);
+  const audioResults: (Uint8Array | null)[] = new Array(cleanAudioSegments.length).fill(null);
   let receivedBytes = 0;
   let nextIdx = 0;
   let activeWorkers = 0;
@@ -391,7 +602,7 @@ export async function downloadHlsSegments(
     return raw;
   };
 
-  const fetchSegWithRetry = async (seg: HlsSegmentInfo, _segIdx: number): Promise<Uint8Array> => {
+  const fetchSegWithRetry = async (seg: HlsSegmentInfo): Promise<Uint8Array> => {
     let attempt = 0;
     for (;;) {
       try {
@@ -401,17 +612,17 @@ export async function downloadHlsSegments(
         }
         const resp = await fetcher(seg.url, { headers, signal });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        let bytes: Uint8Array<any> = new Uint8Array(await resp.arrayBuffer());
+        let bytes: Uint8Array = new Uint8Array(await resp.arrayBuffer());
 
         if (seg.key?.method === "AES-128") {
           if (!seg.key.uri) throw new Error("нет URI ключа");
           const rawKey = await fetchKey(seg.key.uri);
           const ivHex = seg.key.iv ? seg.key.iv.replace(/^0[xX]/, "") : undefined;
           const iv = ivHex ? hexToBytes(ivHex) : seqToIv(seg.seq);
-          bytes = await aesCbcDecryptNoPad(rawKey, iv, bytes);
+          bytes = (await aesCbcDecryptNoPad(rawKey, iv, bytes)) as Uint8Array;
         }
 
-        return bytes as Uint8Array;
+        return bytes;
       } catch (e) {
         if (signal?.aborted) throw e;
         attempt++;
@@ -433,13 +644,16 @@ export async function downloadHlsSegments(
         return;
       }
 
-      const idx = nextIdx++;
-      const seg = cleanSegments[idx];
+      const task = allTasks[nextIdx++];
       activeWorkers++;
 
-      fetchSegWithRetry(seg, idx)
+      fetchSegWithRetry(task.seg)
         .then((bytes) => {
-          results[idx] = bytes;
+          if (task.isAudio) {
+            audioResults[task.orderIdx] = bytes;
+          } else {
+            videoResults[task.orderIdx] = bytes;
+          }
           receivedBytes += bytes.byteLength;
           onProgress?.(receivedBytes, totalSegments);
         })
@@ -448,12 +662,11 @@ export async function downloadHlsSegments(
             rejected = true;
             return reject(new Error("Aborted"));
           }
-          if (seg.isInit) {
+          if (task.seg.isInit) {
             rejected = true;
             return reject(new Error(`init-сегмент недоступен: ${(err as Error).message}`));
           }
-          manifestLog.warn(`HLS seg[${idx + 1}/${totalSegments}]: ${(err as Error).message} — пропущен`);
-          results[idx] = null;
+          manifestLog.warn(`HLS seg (${task.isAudio ? "audio" : "video"}[${task.orderIdx + 1}]): ${(err as Error).message} — пропущен`);
         })
         .finally(() => {
           activeWorkers--;
@@ -467,16 +680,41 @@ export async function downloadHlsSegments(
     }
   });
 
-  // Собираем в Blobs порциями по 16 МБ для исключения переполнения непрерывной V8 кучи
+  // 3. Объединение: если есть и видео fMP4 init, и аудио fMP4 init — мультиплексируем
+  const vInitBytes = videoResults.find((_, i) => cleanVideoSegments[i]?.isInit);
+  const aInitBytes = audioResults.find((_, i) => cleanAudioSegments[i]?.isInit);
+
+  if (sawFmp4 && vInitBytes && aInitBytes && hasAudioTrack) {
+    manifestLog.info("HLS: мультиплексирование fMP4 дорожек (видео + аудио)...");
+    const mergedInit = mergeFmp4Init(vInitBytes, aInitBytes);
+
+    const blobParts: any[] = [mergedInit];
+    const vMedia = videoResults.filter((_, i) => !cleanVideoSegments[i]?.isInit);
+    const aMedia = audioResults.filter((_, i) => !cleanAudioSegments[i]?.isInit);
+    const maxLen = Math.max(vMedia.length, aMedia.length);
+
+    for (let i = 0; i < maxLen; i++) {
+      const v = vMedia[i];
+      if (v) blobParts.push(v);
+      const a = aMedia[i];
+      if (a) blobParts.push(rewriteAudioFragmentTrackId(a));
+    }
+
+    manifestLog.info(`HLS: готово! Мультиплексировано ${vMedia.length} видео и ${aMedia.length} аудио фрагментов`);
+    return new Blob(blobParts, { type: "video/mp4" });
+  }
+
+  // Обычное сохранение монолитного потока (если нет отдельной аудиодорожки или MPEG-TS)
   const blobParts: Blob[] = [];
   const BATCH_BYTES = 16 * 1024 * 1024;
   let curBatch: BlobPart[] = [];
   let curBytes = 0;
   const mime = sawFmp4 ? "video/mp4" : "video/mp2t";
 
-  for (let i = 0; i < results.length; i++) {
-    const p = results[i];
-    results[i] = null; // освобождаем для сборщика мусора
+  const allOrderedResults = [...videoResults, ...audioResults];
+  for (let i = 0; i < allOrderedResults.length; i++) {
+    const p = allOrderedResults[i];
+    allOrderedResults[i] = null;
     if (!p) continue;
     curBatch.push(p as unknown as BlobPart);
     curBytes += p.byteLength;

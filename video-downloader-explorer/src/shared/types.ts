@@ -181,6 +181,8 @@ export interface VideoCandidate {
 export interface HlsVariant {
   id: string;
   url: string;
+  /** URL медиа-плейлиста аудиодорожки из #EXT-X-MEDIA:TYPE=AUDIO. */
+  audioUrl?: string;
   bandwidth: number;       // бит/с
   width?: number;
   height?: number;

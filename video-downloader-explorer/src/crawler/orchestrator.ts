@@ -341,6 +341,7 @@ export class Crawler {
 
   /** URL страницы, на которой задача была запущена (для сброса при навигации). */
   get rootUrl(): string { return this.deps.rootUrl; }
+  get rootTitle(): string | undefined { return this.deps.rootTitle; }
 
   snapshot(): JobView {
     const taskCounts = this.computeTaskCounts();

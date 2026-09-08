@@ -155,6 +155,30 @@ export function collectFromElement(el: Element, baseUrl: string, seen: string[])
     if (isDataUrl(s.url)) c.sourceType = "data";
     out.push(c);
   }
+
+  // WebRTC MediaStream (video.srcObject) — прямой эфир без URL-файла
+  if (sources.length === 0 && (v as any).srcObject) {
+    const stream = (v as any).srcObject;
+    const streamId = stream?.id || `stream_${Date.now()}`;
+    const webrtcUrl = `webrtc:${location.hostname}/${streamId}`;
+    if (!seen.includes(webrtcUrl)) {
+      seen.push(webrtcUrl);
+      out.push({
+        videoUrl: webrtcUrl,
+        sourceType: "webrtc",
+        container: "webm",
+        mimeType: "video/webm",
+        isManifest: false,
+        isLive: true,
+        width: v.videoWidth || undefined,
+        height: v.videoHeight || undefined,
+        thumbnailUrl: v.poster || undefined,
+        title: v.title || v.getAttribute("aria-label") || `🔴 WebRTC эфир (${location.hostname})`,
+        context: { isWebRTC: true, streamId },
+      });
+    }
+  }
+
   return out;
 }
 

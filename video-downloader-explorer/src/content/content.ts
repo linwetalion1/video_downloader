@@ -108,7 +108,32 @@ try {
 if (!(globalThis as Record<string, unknown>)[FLAG]) {
   (globalThis as Record<string, unknown>)[FLAG] = true;
 
-  console.info("[VDE] content script ready");
+  console.info(`[VDE] content script ready (${window === window.top ? "top" : "subframe"})`);
+
+  // Если мы внутри sub-frame (iframe / embed плеер) — автоматически сканируем локальный DOM фрейма
+  if (window !== window.top) {
+    setTimeout(async () => {
+      try {
+        const res = await scanAll({
+          autoScroll: false,
+          monitorMs: 1500,
+          scanIframes: false,
+          detectPlayers: true,
+          detectSocial: true,
+          sniffPerfResources: true,
+          expandManifests: true,
+          downloadBlobs: true,
+        });
+        if (res.candidates.length > 0) {
+          chrome.runtime.sendMessage({
+            type: "VDE_FRAME_CANDIDATES",
+            frameUrl: location.href,
+            candidates: res.candidates,
+          });
+        }
+      } catch { /* ignore */ }
+    }, 400);
+  }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg) return;

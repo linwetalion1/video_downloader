@@ -24,6 +24,7 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
   const MANIFEST_PATH_RE = /\/api\/manifest\/(hls_playlist|dash)\//i;
   const VIDEOPLAYBACK_RE = /googlevideo\.com\/(videoplayback|api\/manifest)/i;
   const VK_MEDIA_RE = /(?:vkvideo\.ru|vkuservideo\.net|mycdn\.me|vk\.me)\/.*?(?:m3u8|mpd|mp4|\/hls\/|\/live\/)/i;
+  const STREAM_HOST_RE = /(?:mmcdn\.com|chaturbate\.com|stripchat\.com|bongacams\.com|cam4\.com|livejasmin\.com|streamate\.com|uncams\.com)\/.*?(?:m3u8|mpd|mp4|\/hls|\/live|\/stream)/i;
 
   function report(url: string, mime?: string): void {
     try {
@@ -31,7 +32,7 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
       if (!u.startsWith("http")) return;
       // JSON часто содержит экранированные слэши.
       const probe = u.replace(/\\\//g, "/");
-      if (!MEDIA_RE.test(probe) && !MANIFEST_PATH_RE.test(probe) && !VIDEOPLAYBACK_RE.test(probe) && !VK_MEDIA_RE.test(probe)) return;
+      if (!MEDIA_RE.test(probe) && !MANIFEST_PATH_RE.test(probe) && !VIDEOPLAYBACK_RE.test(probe) && !VK_MEDIA_RE.test(probe) && !STREAM_HOST_RE.test(probe)) return;
       u = probe.split("#")[0];
       if (seen.has(u) && buffer.length < MAX_BUFFER) return;
       seen.add(u);
@@ -55,13 +56,15 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
       while ((m = mre.exec(t)) !== null) report(m[0], mime);
       const vkre = /https?:\/\/[^\s"'<>\\)]+?(?:vkvideo\.ru|vkuservideo\.net|mycdn\.me|vk\.me)[^\s"'<>\\)]*?(?:m3u8|mpd|\/hls\/|\/live\/)[^\s"'<>\\)]*/gi;
       while ((m = vkre.exec(t)) !== null) report(m[0], mime);
+      const stre = /https?:\/\/[^\s"'<>\\)]+?(?:mmcdn\.com|chaturbate\.com|stripchat\.com|bongacams\.com|cam4\.com|livejasmin\.com|streamate\.com)[^\s"'<>\\)]*?(?:m3u8|mpd|mp4|\/hls|\/live|\/stream)[^\s"'<>\\)]*/gi;
+      while ((m = stre.exec(t)) !== null) report(m[0], mime);
     } catch { /* ignore */ }
   }
 
   function looksManifestish(url: string): boolean {
     return /\.m3u8(\?|$)/i.test(url) || /\.mpd(\?|$)/i.test(url)
       || /format=m3u8/i.test(url) || /\/hls\//i.test(url) || MANIFEST_PATH_RE.test(url)
-      || VK_MEDIA_RE.test(url);
+      || VK_MEDIA_RE.test(url) || STREAM_HOST_RE.test(url);
   }
 
   function classifyAndReport(url: string, mime?: string, bodyText?: string | null): void {
@@ -123,6 +126,33 @@ export const VDE_MAIN_WORLD_SNIFFER = function vdeMainWorldSniffer(): void {
       } catch { /* ignore */ }
       return origSend.apply(this, sendArgs as any[]);
     };
+  }
+
+  // ── WebSocket hook ───────────────────────────────────────────────────────
+  const OrigWS = w.WebSocket;
+  if (OrigWS) {
+    w.WebSocket = function (url: string | URL, protocols?: string | string[]) {
+      try {
+        const u = String(url || "");
+        if (/wss?:\/\//i.test(u) && (/video|stream|live|flv|hls|media/i.test(u) || STREAM_HOST_RE.test(u))) {
+          report(u.replace(/^ws/i, "http"), "application/x-mpegurl");
+        }
+      } catch { /* ignore */ }
+      const ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
+      try {
+        ws.addEventListener("message", (ev: MessageEvent) => {
+          if (typeof ev.data === "string" && ev.data.length < 50000) {
+            scanText(ev.data);
+          }
+        });
+      } catch { /* ignore */ }
+      return ws;
+    };
+    w.WebSocket.prototype = OrigWS.prototype;
+    w.WebSocket.CONNECTING = OrigWS.CONNECTING;
+    w.WebSocket.OPEN = OrigWS.OPEN;
+    w.WebSocket.CLOSING = OrigWS.CLOSING;
+    w.WebSocket.CLOSED = OrigWS.CLOSED;
   }
 
   // ── Ответ на пинг content script'а ───────────────────────────────────────

@@ -40,6 +40,8 @@ export type SourceType =
   | "rumble"           // Rumble
   | "perf-resource"    // performance.getEntriesByType('resource')
   | "sniff"            // перехват fetch/XHR в MAIN world страницы
+  | "webrequest"       // сетевой перехват chrome.webRequest (media/chunks)
+  | "webrtc"           // WebRTC MediaStream (video.srcObject)
   | "meta"             // <meta property="og:video">
   | "link"             // <a href="…mp4">
   | "other";

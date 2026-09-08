@@ -80,7 +80,9 @@ export function VideoCard({ candidate, onSelect, onAction }: {
               </div>
             )}
             <div className="card-overlay-top">
-              {isLive ? (
+              {c.sourceType === "webrtc" ? (
+                <span className="badge live">🔴 WEBRTC ЭФИР</span>
+              ) : isLive ? (
                 <span className="badge live">🔴 ПРЯМОЙ ЭФИР</span>
               ) : isLongBroadcast ? (
                 <span className="badge stream">📼 ТРАНСЛЯЦИЯ</span>
@@ -172,6 +174,10 @@ export function VideoCard({ candidate, onSelect, onAction }: {
             ) : isDone ? (
               <span className="card-status-badge ok">
                 ✅ {c.receivedBytes ? formatBytes(c.receivedBytes) : "Скачано"}
+              </span>
+            ) : c.sourceType === "webrtc" ? (
+              <span className="card-status-badge live" title="Прямой эфир WebRTC (воспроизводится в реальном времени, нажмите 👁️ для предпросмотра)">
+                🔴 WebRTC
               </span>
             ) : c.isBlob ? (
               <button className="btn sm" onClick={() => onAction("rescan")} title="Поиск прямых источников">

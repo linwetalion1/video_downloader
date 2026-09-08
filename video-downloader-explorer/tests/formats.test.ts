@@ -58,3 +58,45 @@ describe("detectFormat", () => {
     expect(r.container).toBe("mp4");
   });
 });
+
+import { collectFromElement } from "../src/content/video-scanner";
+
+describe("WebRTC detection", () => {
+  it("детектирует WebRTC поток через video.srcObject", () => {
+    const mockVideo = {
+      tagName: "VIDEO",
+      querySelectorAll: () => [],
+      getAttribute: (attr: string) => (attr === "aria-label" ? "Live cam model" : null),
+      currentSrc: "",
+      srcObject: { id: "webrtc-track-12345" },
+      videoWidth: 1920,
+      videoHeight: 1080,
+      poster: "https://example.com/poster.jpg",
+    } as unknown as HTMLVideoElement;
+
+    const seen: string[] = [];
+    const candidates = collectFromElement(mockVideo, "https://cam-site.com/model1", seen);
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].sourceType).toBe("webrtc");
+    expect(candidates[0].container).toBe("webm");
+    expect(candidates[0].isLive).toBe(true);
+    expect(candidates[0].width).toBe(1920);
+    expect(candidates[0].height).toBe(1080);
+    expect(candidates[0].videoUrl).toContain("webrtc:");
+  });
+
+  it("игнорирует video без src и без srcObject", () => {
+    const mockVideo = {
+      tagName: "VIDEO",
+      querySelectorAll: () => [],
+      getAttribute: () => null,
+      currentSrc: "",
+      srcObject: null,
+    } as unknown as HTMLVideoElement;
+
+    const seen: string[] = [];
+    const candidates = collectFromElement(mockVideo, "https://example.com", seen);
+    expect(candidates).toHaveLength(0);
+  });
+});

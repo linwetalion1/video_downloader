@@ -156,7 +156,11 @@ async function resolveActiveTabId(): Promise<number | null> {
 
 async function ensureContentScript(tabId: number, tabUrl: string): Promise<boolean> {
   const tryInject = async () => {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    try {
+      await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] });
+    } catch {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    }
   };
   try {
     await tryInject();
@@ -182,10 +186,15 @@ async function ensureContentScript(tabId: number, tabUrl: string): Promise<boole
  *  (Instagram GraphQL и т.п.). Инжект до каждого скана — идемпотентен. */
 async function installMainWorldSniffer(tabId: number): Promise<void> {
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN" as chrome.scripting.ExecutionWorld, func: VDE_MAIN_WORLD_SNIFFER });
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, world: "MAIN" as chrome.scripting.ExecutionWorld, func: VDE_MAIN_WORLD_SNIFFER });
     swLog.info("MAIN-world сниффер сети установлен");
-  } catch (e) {
-    swLog.warn(`MAIN-world сниффер не установлен: ${(e as Error).message}`);
+  } catch {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN" as chrome.scripting.ExecutionWorld, func: VDE_MAIN_WORLD_SNIFFER });
+      swLog.info("MAIN-world сниффер сети установлен (главный фрейм)");
+    } catch (e) {
+      swLog.warn(`MAIN-world сниффер не установлен: ${(e as Error).message}`);
+    }
   }
 }
 
@@ -232,8 +241,20 @@ async function scanActiveTab(): Promise<{ candidates: import("../shared/types").
   if (!resp?.ok || !resp.result) {
     throw new Error(resp?.error || "Контент-скрипт не вернул результат");
   }
-  swLog.info(`Скан OK: ${resp.result.candidates.length} кандидатов за ${Date.now() - t0}ms`);
-  return { candidates: resp.result.candidates, pageMeta: resp.result.pageMeta, tabUrl };
+  const domCandidates: import("../shared/types").RawVideoCandidate[] = resp.result.candidates || [];
+  const netCandidates: import("../shared/types").RawVideoCandidate[] = Array.from(tabMediaRequests.get(tab.id!)?.values() || []);
+
+  const seenUrls = new Set<string>();
+  const candidates: import("../shared/types").RawVideoCandidate[] = [];
+  for (const c of [...domCandidates, ...netCandidates]) {
+    if (!seenUrls.has(c.videoUrl)) {
+      seenUrls.add(c.videoUrl);
+      candidates.push(c);
+    }
+  }
+
+  swLog.info(`Скан OK: ${candidates.length} кандидатов (${domCandidates.length} из DOM, ${netCandidates.length} из сети) за ${Date.now() - t0}ms`);
+  return { candidates, pageMeta: resp.result.pageMeta, tabUrl };
 }
 
 // ─── Job lifecycle (per-tab) ──────────────────────────────────────────────
@@ -441,12 +462,12 @@ async function handleMessage(msg: PanelToWorkerMsg, port: chrome.runtime.Port): 
   }
 }
 
-// ─── Диагностика: подслушиваем настоящие заголовки медиа-запросов страницы ──
-// download-helper'ы именно так узнают, что требует hotlink-защита сайта.
-// Пассивный webRequest (MV3 разрешает observer без блокировки).
-// Приватность: Cookie/Authorization не логируются; Referer маскируется до
-// origin (полный URL страницы в экспортируемый лог не попадает).
+// ─── Сетевой перехват webRequest: ловит реальные медиа-потоки браузера ─────
+// Ловит нативные <video src>, iframe-плееры, DASH/HLS манифесты и чанки,
+// даже если DOM изолирован в cross-origin iframe или shadow root.
+const tabMediaRequests = new Map<number, Map<string, import("../shared/types").RawVideoCandidate>>();
 const seenReqHeaders = new Map<string, number>();
+
 function installWebRequestObserver(): void {
   if (!chrome.webRequest?.onBeforeSendHeaders) return;
   try {
@@ -454,23 +475,53 @@ function installWebRequestObserver(): void {
       (details) => {
         try {
           const url = details.url || "";
-          if (!/\.(mp4|webm|mkv|mov|m4v|ts|m3u8|mpd)(\?|$)/i.test(url) && !/videoplayback/i.test(url)) return;
+          const isMediaReq = details.type === "media";
+          const isMediaExt = /\.(mp4|webm|mkv|mov|m4v|ts|m3u8|mpd)(\?|$)/i.test(url);
+          const isKnownMediaPattern = /videoplayback|\/hls\/|\/live\/|\/stream\/|\.mmcdn\.com/i.test(url);
+          if (!isMediaReq && !isMediaExt && !isKnownMediaPattern) return;
+
+          // Регистрируем кандидата в сетевой буфер вкладки
+          const isHls = /\.m3u8(\?|$)/i.test(url) || /\/hls\//i.test(url);
+          const isDash = /\.mpd(\?|$)/i.test(url) || /\/dash\//i.test(url);
+          const isWebm = /\.webm(\?|$)/i.test(url);
+          const container = isHls ? "hls" : isDash ? "dash" : (isWebm ? "webm" : "mp4");
+          const cand: import("../shared/types").RawVideoCandidate = {
+            videoUrl: url,
+            sourceType: "webrequest",
+            container,
+            isManifest: isHls || isDash,
+            mimeType: isHls ? "application/x-mpegurl" : isDash ? "application/dash+xml" : (isWebm ? "video/webm" : "video/mp4"),
+            context: { via: "webrequest", type: details.type },
+          };
+
+          if (details.tabId > 0) {
+            let m = tabMediaRequests.get(details.tabId);
+            if (!m) { m = new Map(); tabMediaRequests.set(details.tabId, m); }
+            m.set(url, cand);
+
+            const c = crawlers.get(details.tabId);
+            if (c) {
+              c.addCandidates([cand], c.rootUrl || url, c.rootTitle);
+            }
+          }
+
           const key = new URL(url).hostname;
           const n = seenReqHeaders.get(key) ?? 0;
-          if (n >= 10) return;
-          seenReqHeaders.set(key, n + 1);
-          const headers = (details.requestHeaders || [])
-            .map((h) => {
-              const name = h.name || "";
-              const value = h.value || "";
-              if (/^cookie$|^authorization$/i.test(name)) return `${name}: <hidden>`;
-              if (/^referer$/i.test(name)) {
-                try { return `Referer: ${new URL(value).origin}/`; } catch { return "Referer: <invalid>"; }
-              }
-              return `${name}: ${value.slice(0, 120)}`;
-            })
-            .join(" | ");
-          swLog.info(`[webrequest] ${key} #${n + 1} (${details.type || "?"}): ${headers || "(пусто)"}`);
+          if (n < 10) {
+            seenReqHeaders.set(key, n + 1);
+            const headers = (details.requestHeaders || [])
+              .map((h) => {
+                const name = h.name || "";
+                const value = h.value || "";
+                if (/^cookie$|^authorization$/i.test(name)) return `${name}: <hidden>`;
+                if (/^referer$/i.test(name)) {
+                  try { return `Referer: ${new URL(value).origin}/`; } catch { return "Referer: <invalid>"; }
+                }
+                return `${name}: ${value.slice(0, 120)}`;
+              })
+              .join(" | ");
+            swLog.info(`[webrequest] ${key} #${n + 1} (${details.type || "?"}): ${headers || "(пусто)"}`);
+          }
         } catch { /* ignore */ }
       },
       { urls: ["http://*/*", "https://*/*"] },
@@ -478,6 +529,28 @@ function installWebRequestObserver(): void {
     );
   } catch { /* ignore */ }
 }
+
+// Слушатель сообщений от sub-frame контент-скриптов
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
+  if (msg.type === "VDE_FRAME_CANDIDATES" && Array.isArray(msg.candidates)) {
+    const tabId = sender.tab?.id;
+    if (tabId && tabId > 0) {
+      let m = tabMediaRequests.get(tabId);
+      if (!m) { m = new Map(); tabMediaRequests.set(tabId, m); }
+      for (const c of msg.candidates) {
+        if (c?.videoUrl) m.set(c.videoUrl, c);
+      }
+      const crawler = crawlers.get(tabId);
+      if (crawler) {
+        crawler.addCandidates(msg.candidates, sender.tab?.url || msg.frameUrl || "", sender.tab?.title);
+      }
+      swLog.info(`Subframe (${sender.tab?.title || tabId}): +${msg.candidates.length} кандидатов из фрейма`);
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+});
 
 // ─── Tabs lifecycle: переключение/закрытие/навигация ──────────────────────
 
@@ -492,6 +565,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabMediaRequests.delete(tabId);
   const c = crawlers.get(tabId);
   if (c) { c.cancel(); c.destroy(); }
   crawlers.delete(tabId);
